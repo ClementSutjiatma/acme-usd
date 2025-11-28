@@ -3,6 +3,7 @@ import {
   createWalletClient,
   http,
   parseUnits,
+  formatUnits,
   keccak256,
   toBytes,
   type Hash,
@@ -16,10 +17,16 @@ import { TIP20_ABI, ISSUER_ROLE } from "./contracts";
 // TIP-20 decimals
 const DECIMALS = 6;
 
+// RPC timeout and retry configuration
+// Tempo finalizes quickly, so 15s timeout with 2 retries should be plenty
+const RPC_TIMEOUT = 15_000; // 15 seconds
+const RPC_RETRY_COUNT = 2;
+const RPC_RETRY_DELAY = 500; // 500ms base delay
+
 // Tempo chain with AlphaUSD as fee token
 const tempoChain = tempo({ feeToken: config.alphaUsdAddress });
 
-// Create authenticated HTTP transport
+// Create authenticated HTTP transport with timeout and retry config
 function createAuthenticatedTransport() {
   const fetchOptions = config.tempoRpcAuth
     ? {
@@ -29,7 +36,12 @@ function createAuthenticatedTransport() {
       }
     : undefined;
 
-  return http(config.tempoRpcBaseUrl, { fetchOptions });
+  return http(config.tempoRpcBaseUrl, {
+    fetchOptions,
+    timeout: RPC_TIMEOUT,
+    retryCount: RPC_RETRY_COUNT,
+    retryDelay: RPC_RETRY_DELAY,
+  });
 }
 
 // Create public client for reading blockchain state
@@ -64,7 +76,36 @@ export function getBackendAddress(): Address {
   return account.address;
 }
 
-// Mint AcmeUSD to a user address
+// Get AcmeUSD balance for an address (returns amount in USD as number)
+export async function getAcmeUsdBalance(address: Address): Promise<number> {
+  if (!config.acmeUsdAddress) {
+    throw new Error("AcmeUSD address not configured");
+  }
+
+  const client = createTempoPublicClient();
+
+  const balance = await client.readContract({
+    address: config.acmeUsdAddress,
+    abi: TIP20_ABI,
+    functionName: "balanceOf",
+    args: [address],
+  });
+
+  // Convert from raw units (6 decimals) to USD number
+  return parseFloat(formatUnits(balance as bigint, DECIMALS));
+}
+
+// Check if an error is a timeout error
+function isTimeoutError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return message.includes('timeout') || message.includes('timed out');
+  }
+  return false;
+}
+
+// Mint AcmeUSD to a user address with timeout recovery
+// If a timeout occurs, verifies on-chain balance to determine if mint succeeded
 export async function mintAcmeUsd(
   toAddress: Address,
   amountUsd: number // Amount in dollars (e.g., 100 for $100)
@@ -77,20 +118,66 @@ export async function mintAcmeUsd(
   const publicClient = createTempoPublicClient();
   const amount = parseUnits(amountUsd.toString(), DECIMALS);
 
+  console.log(`[MINT] Using RPC: ${config.tempoRpcBaseUrl}, Auth: ${!!config.tempoRpcAuth}`);
   console.log(`[MINT] Minting ${amountUsd} AcmeUSD to ${toAddress}`);
 
-  const hash = await walletClient.writeContract({
-    address: config.acmeUsdAddress,
-    abi: TIP20_ABI,
-    functionName: "mint",
-    args: [toAddress, amount],
-  });
+  // Check balance before mint for verification
+  let balanceBefore: number;
+  try {
+    balanceBefore = await getAcmeUsdBalance(toAddress);
+    console.log(`[MINT] Balance before: ${balanceBefore} AcmeUSD`);
+  } catch (balanceError) {
+    console.warn(`[MINT] Could not get balance before mint, proceeding without verification`);
+    balanceBefore = -1; // Flag that we couldn't get initial balance
+  }
 
-  // Wait for transaction to be confirmed
-  await publicClient.waitForTransactionReceipt({ hash });
+  try {
+    const hash = await walletClient.writeContract({
+      address: config.acmeUsdAddress,
+      abi: TIP20_ABI,
+      functionName: "mint",
+      args: [toAddress, amount],
+    });
 
-  console.log(`[MINT] Minted successfully. TX: ${hash}`);
-  return hash;
+    // Wait for transaction to be confirmed
+    await publicClient.waitForTransactionReceipt({ hash });
+
+    console.log(`[MINT] Minted successfully. TX: ${hash}`);
+    return hash;
+  } catch (error) {
+    console.error(`[MINT] Error during mint:`, error);
+
+    // If we have a baseline balance and got a timeout, verify on-chain state
+    if (balanceBefore >= 0 && isTimeoutError(error)) {
+      console.log(`[MINT] Timeout detected, verifying on-chain balance...`);
+      
+      // Wait a moment for any pending transaction to finalize
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      try {
+        const balanceAfter = await getAcmeUsdBalance(toAddress);
+        const expectedIncrease = amountUsd;
+        const actualIncrease = balanceAfter - balanceBefore;
+        
+        console.log(`[MINT] Balance after: ${balanceAfter} AcmeUSD (increase: ${actualIncrease})`);
+        
+        // Allow for small floating point differences
+        if (actualIncrease >= expectedIncrease - 0.01) {
+          console.log(`[MINT] Balance verification SUCCESS - mint completed despite timeout`);
+          // Return a placeholder hash since we don't have the actual one
+          // The important thing is the mint succeeded
+          return `0x${'0'.repeat(64)}` as Hash;
+        } else {
+          console.log(`[MINT] Balance verification FAILED - mint did not complete`);
+        }
+      } catch (verifyError) {
+        console.error(`[MINT] Could not verify balance after timeout:`, verifyError);
+      }
+    }
+
+    // Re-throw the original error if we couldn't verify success
+    throw error;
+  }
 }
 
 // Burn AcmeUSD from treasury

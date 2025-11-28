@@ -61,23 +61,34 @@ export async function POST(request: NextRequest) {
         try {
           // Mint AcmeUSD to user
           // We don't await here to avoid Stripe webhook timeout
+          // mintAcmeUsd now includes timeout recovery - if RPC times out but balance increases, it succeeds
           mintAcmeUsd(
             userAddress as `0x${string}`,
             amountUsd
           ).then(async (mintTxHash) => {
             // Update status to minted
-            console.log(`[WEBHOOK] Updating status to 'minted' for ${paymentIntent.id}`);
+            // Note: mintTxHash may be a placeholder (0x000...0) if mint was verified via balance check after timeout
+            const isVerifiedMint = mintTxHash === `0x${'0'.repeat(64)}`;
+            console.log(`[WEBHOOK] Updating status to 'minted' for ${paymentIntent.id}${isVerifiedMint ? ' (verified via balance check)' : ''}`);
+            
             const mintedUpdate = await updateOnrampStatus(supabase, paymentIntent.id, {
               status: "minted",
-              mint_tx_hash: mintTxHash,
+              mint_tx_hash: isVerifiedMint ? undefined : mintTxHash, // Don't store placeholder hash
             });
             console.log(`[WEBHOOK] Status updated to 'minted':`, mintedUpdate?.status);
-            console.log(`[WEBHOOK] Minted ${amountUsd} AcmeUSD to ${userAddress}, tx: ${mintTxHash}`);
+            console.log(`[WEBHOOK] Minted ${amountUsd} AcmeUSD to ${userAddress}${isVerifiedMint ? ' (tx hash unavailable - verified via balance)' : `, tx: ${mintTxHash}`}`);
           }).catch(async (mintError) => {
-            console.error("[WEBHOOK] Mint failed:", mintError);
+            // If we get here, the mint truly failed (balance did not increase after timeout, or other error)
+            const errorMessage = mintError instanceof Error ? mintError.message : "Unknown error";
+            const isTimeout = errorMessage.toLowerCase().includes('timeout');
+            
+            console.error(`[WEBHOOK] Mint failed${isTimeout ? ' (timeout, balance verification also failed)' : ''}:`, mintError);
+            
             await updateOnrampStatus(supabase, paymentIntent.id, {
               status: "failed",
-              error_message: mintError instanceof Error ? mintError.message : "Unknown error",
+              error_message: isTimeout 
+                ? `Timeout: ${errorMessage} (balance verification failed)` 
+                : errorMessage,
             });
           });
 
