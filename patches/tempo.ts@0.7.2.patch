@@ -1,0 +1,17 @@
+diff --git a/dist/viem/Transaction.js b/dist/viem/Transaction.js
+index b9642716b74c1220cd6014b82e209195765548ac..4c737f947ba43016b9d952fc27c6225451d4f17e 100644
+--- a/dist/viem/Transaction.js
++++ b/dist/viem/Transaction.js
+@@ -159,7 +159,11 @@ async function serializeAA(transaction, sig) {
+         });
+     }
+     if (feePayer === true) {
+-        const serialized = TxAA.serialize(transaction_ox, {
++        // Per AA Transaction Spec: when fee_payer_signature is present,
++        // the sender signs with fee_token as empty (0x80).
++        // We set feeToken: undefined so the sender's signature hash excludes it.
++        const txForSigning = { ...transaction_ox, feeToken: undefined };
++        const serialized = TxAA.serialize(txForSigning, {
+             feePayerSignature: null,
+             signature,
+         });
