@@ -2,20 +2,41 @@
  * Script to find the deployed token address from a transaction hash
  */
 
+import * as dotenv from "dotenv";
+import * as path from "path";
+
+// Load .env.local BEFORE accessing process.env
+dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
+
 import { createPublicClient, http, decodeEventLog, type Address } from "viem";
 import { tempo } from "tempo.ts/chains";
 import { TIP20_FACTORY_ABI } from "../src/lib/contracts";
 
-const TEMPO_RPC_BASE_URL = "https://rpc.testnet.tempo.xyz";
-const TEMPO_AUTH = Buffer.from("dreamy-northcutt:recursing-payne").toString("base64");
-const ALPHA_USD = "0x20c0000000000000000000000000000000000001" as Address;
+// Parse RPC URL from environment
+function parseRpcUrl(url: string): { baseUrl: string; auth?: string } {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username && parsed.password) {
+      const auth = Buffer.from(`${parsed.username}:${parsed.password}`).toString("base64");
+      const baseUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+      return { baseUrl, auth };
+    }
+    return { baseUrl: url };
+  } catch {
+    return { baseUrl: url };
+  }
+}
+
+const rawRpcUrl = process.env.TEMPO_RPC_URL || "https://rpc.testnet.tempo.xyz";
+const { baseUrl: TEMPO_RPC_BASE_URL, auth: TEMPO_AUTH } = parseRpcUrl(rawRpcUrl);
+const ALPHA_USD = (process.env.ALPHA_USD_ADDRESS || "0x20c0000000000000000000000000000000000001") as Address;
 
 const httpTransport = http(TEMPO_RPC_BASE_URL, {
-  fetchOptions: {
+  fetchOptions: TEMPO_AUTH ? {
     headers: {
       Authorization: `Basic ${TEMPO_AUTH}`,
     },
-  },
+  } : undefined,
 });
 
 const publicClient = createPublicClient({

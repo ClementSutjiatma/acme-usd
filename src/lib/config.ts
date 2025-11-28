@@ -15,7 +15,7 @@ function parseRpcUrl(url: string): { baseUrl: string; auth?: string } {
   }
 }
 
-const rawRpcUrl = process.env.TEMPO_RPC_URL || "https://dreamy-northcutt:recursing-payne@rpc.testnet.tempo.xyz";
+const rawRpcUrl = process.env.TEMPO_RPC_URL || "https://rpc.testnet.tempo.xyz";
 const { baseUrl: tempoRpcBaseUrl, auth: tempoRpcAuth } = parseRpcUrl(rawRpcUrl);
 
 export const config = {
@@ -51,9 +51,14 @@ export const config = {
   explorerUrl: "https://explore.tempo.xyz",
 } as const;
 
+// Parse public RPC URL for client-side
+const publicRpcUrl = process.env.NEXT_PUBLIC_TEMPO_RPC_URL || "https://rpc.testnet.tempo.xyz";
+const { baseUrl: publicTempoRpcBaseUrl, auth: publicTempoRpcAuth } = parseRpcUrl(publicRpcUrl);
+
 // Public config for client-side
 export const publicConfig = {
-  tempoRpcBaseUrl: "https://rpc.testnet.tempo.xyz",
+  tempoRpcBaseUrl: publicTempoRpcBaseUrl,
+  tempoRpcAuth: publicTempoRpcAuth,
   acmeUsdAddress: process.env.NEXT_PUBLIC_ACME_USD_ADDRESS as `0x${string}` | undefined,
   alphaUsdAddress: "0x20c0000000000000000000000000000000000001" as `0x${string}`,
   stripePublicKey: process.env.NEXT_PUBLIC_STRIPE_KEY || "",

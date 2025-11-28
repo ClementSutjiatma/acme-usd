@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createTempoPublicClient, hasIssuerRole, getBackendAddress } from "@/lib/tempo";
+import { createTempoPublicClient, hasIssuerRole, getBackendAddress } from "@/lib/blockchain";
 import { config } from "@/lib/config";
 
 export async function GET() {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseClient, createOfframpRecord } from "@/lib/supabase";
-import { generateMemo } from "@/lib/tempo";
+import { generateMemo } from "@/lib/blockchain";
 import { config } from "@/lib/config";
 import { randomUUID } from "crypto";
 

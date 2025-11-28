@@ -6,36 +6,36 @@ import { useState, type ReactNode } from "react";
 import { tempo } from "tempo.ts/chains";
 import { webAuthn, KeyManager } from "tempo.ts/wagmi";
 import { withFeePayer } from "tempo.ts/viem";
+import { publicConfig } from "@/lib/config";
 
 // Tempo testnet configuration with AlphaUSD as fee token
-const ALPHA_USD = "0x20c0000000000000000000000000000000000001" as const;
-const tempoChain = tempo({ feeToken: ALPHA_USD });
+const tempoChain = tempo({ feeToken: publicConfig.alphaUsdAddress });
 
-// RPC configuration
-const TEMPO_RPC_BASE_URL = "https://rpc.testnet.tempo.xyz";
+// Build auth header if credentials are configured
+const authHeader = publicConfig.tempoRpcAuth 
+  ? `Basic ${publicConfig.tempoRpcAuth}` 
+  : undefined;
 
-// WebAuthn accounts ALWAYS use AA transaction format with fee payer fields
-// Using 'sign-and-broadcast': fee payer co-signs AND broadcasts the transaction
-// This avoids the client needing to broadcast (which was causing signature issues)
-const authenticatedHttp = withFeePayer(
-  http(TEMPO_RPC_BASE_URL, {
-    fetchOptions: {
-      headers: {
-        Authorization: `Basic ${btoa("dreamy-northcutt:recursing-payne")}`,
-      },
+// Authenticated HTTP transport
+const authenticatedHttp = http(publicConfig.tempoRpcBaseUrl, {
+  fetchOptions: authHeader ? {
+    headers: {
+      Authorization: authHeader,
     },
-  }),
+  } : undefined,
+});
+
+// Transport with fee payer for gas sponsorship
+const transport = withFeePayer(
+  authenticatedHttp,
   http("/api/sponsor"),
   { policy: "sign-and-broadcast" }
 );
 
-// Use the standard localStorage KeyManager
-// Note: If you had a passkey registered with an older tempo.ts version,
-// you may need to register a new passkey after clearing localStorage
+// KeyManager for passkey storage
 const keyManager = KeyManager.localStorage();
 
-// Create wagmi config with webAuthn connector for passkey wallets
-// Uses localStorage KeyManager for development.
+// Wagmi config
 const config = createConfig({
   chains: [tempoChain],
   connectors: [
@@ -43,9 +43,8 @@ const config = createConfig({
       keyManager,
     }),
   ],
-  multiInjectedProviderDiscovery: false, // Prefer webAuthn connector over injected wallets
   transports: {
-    [tempoChain.id]: authenticatedHttp,
+    [tempoChain.id]: transport,
   },
   ssr: true,
 });
@@ -56,7 +55,6 @@ export function Providers({ children }: { children: ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            // Disable global staleTime so data is always fresh by default
             staleTime: 0,
             refetchOnWindowFocus: false,
           },

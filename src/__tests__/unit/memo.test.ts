@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateMemo } from "@/lib/tempo";
+import { generateMemo } from "@/lib/blockchain";
 import { keccak256, toBytes } from "viem";
 
 describe("generateMemo", () => {

@@ -9,7 +9,7 @@ import {
 import {
   getTransfersToTreasury,
   burnAcmeUsd,
-} from "@/lib/tempo";
+} from "@/lib/blockchain";
 import { createStripeClient, createPayout } from "@/lib/stripe";
 
 // Verify cron secret to prevent unauthorized access

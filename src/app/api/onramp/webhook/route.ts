@@ -5,7 +5,7 @@ import {
   getOnrampByPaymentIntent,
   updateOnrampStatus,
 } from "@/lib/supabase";
-import { mintAcmeUsd } from "@/lib/tempo";
+import { mintAcmeUsd } from "@/lib/blockchain";
 import type Stripe from "stripe";
 
 export async function POST(request: NextRequest) {

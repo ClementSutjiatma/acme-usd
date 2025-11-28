@@ -15,11 +15,27 @@ import { privateKeyToAccount } from "viem/accounts";
 import { tempo } from "tempo.ts/chains";
 import { keccak256 } from "viem/utils";
 
+// Parse RPC URL from environment
+function parseRpcUrl(url: string): { baseUrl: string; auth?: string } {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username && parsed.password) {
+      const auth = Buffer.from(`${parsed.username}:${parsed.password}`).toString("base64");
+      const baseUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+      return { baseUrl, auth };
+    }
+    return { baseUrl: url };
+  } catch {
+    return { baseUrl: url };
+  }
+}
+
+const rawRpcUrl = process.env.TEMPO_RPC_URL || "https://rpc.testnet.tempo.xyz";
+const { baseUrl: tempoRpcBaseUrl, auth: tempoRpcAuth } = parseRpcUrl(rawRpcUrl);
+
 // Inline config to avoid module caching issues
 const backendPrivateKey = process.env.BACKEND_PRIVATE_KEY as `0x${string}` | undefined;
 const alphaUsdAddress = (process.env.ALPHA_USD_ADDRESS || "0x20c0000000000000000000000000000000000001") as `0x${string}`;
-const tempoRpcBaseUrl = "https://rpc.testnet.tempo.xyz";
-const tempoRpcAuth = Buffer.from("dreamy-northcutt:recursing-payne").toString("base64");
 
 async function main() {
   if (!backendPrivateKey) {
@@ -55,11 +71,11 @@ async function main() {
   const client = createClient({
     chain,
     transport: http(tempoRpcBaseUrl, {
-      fetchOptions: {
+      fetchOptions: tempoRpcAuth ? {
         headers: {
           Authorization: `Basic ${tempoRpcAuth}`,
         },
-      },
+      } : undefined,
     }),
   });
 

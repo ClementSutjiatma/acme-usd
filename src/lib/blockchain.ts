@@ -3,7 +3,6 @@ import {
   createWalletClient,
   http,
   parseUnits,
-  formatUnits,
   keccak256,
   toBytes,
   type Hash,
@@ -63,24 +62,6 @@ export function getBackendAddress(): Address {
   }
   const account = privateKeyToAccount(config.backendPrivateKey);
   return account.address;
-}
-
-// Get AcmeUSD balance for an address
-export async function getAcmeUsdBalance(address: Address): Promise<string> {
-  if (!config.acmeUsdAddress) {
-    throw new Error("AcmeUSD address not configured");
-  }
-
-  const client = createTempoPublicClient();
-
-  const balance = await client.readContract({
-    address: config.acmeUsdAddress,
-    abi: TIP20_ABI,
-    functionName: "balanceOf",
-    args: [address],
-  });
-
-  return formatUnits(balance as bigint, DECIMALS);
 }
 
 // Mint AcmeUSD to a user address

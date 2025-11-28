@@ -8,7 +8,7 @@ import {
 import {
   burnAcmeUsd,
   createTempoPublicClient,
-} from "@/lib/tempo";
+} from "@/lib/blockchain";
 import { createStripeClient, createPayout } from "@/lib/stripe";
 import { type Hash } from "viem";
 import { config } from "@/lib/config";
