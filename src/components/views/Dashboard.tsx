@@ -389,10 +389,10 @@ export function Dashboard() {
               <span className="text-2xl font-bold text-black">A</span>
             </div>
             <h2 className="text-xl font-semibold text-black mb-2">
-              Welcome to AcmeUSD
+              Welcome to Acme
             </h2>
             <p className="text-dark-500 mb-6">
-              Buy and sell AUSD seamlessly and securely
+              Buy and withdraw AcmeUSD (AUSD) seamlessly and securely
             </p>
             <div className="grid grid-cols-2 gap-3">
               <motion.button
