@@ -19,9 +19,27 @@ This document outlines the design and implementation plan for building an onramp
 - All users are assumed legitimate (no fraud handling required)
 
 ---
-## User Flow
+## Success Criteria
 
-### Onramp: USD → AcmeUSD
+| Domain      | Success Criteria                                                |
+|-------------|----------------------------------------------------------------|
+| **UX**      | - Onboarding requires no prior token: users can start with $0  |
+|             | - Passkey sign-in with familiar biometrics (Face ID/Touch ID)  |
+|             | - Minimal user actions per flow (onramp: 0 txs, offramp: 1 tx) |
+|             | - Clear, real-time status for onramp/offramp requests          |
+| **Security**| - No double-minting (idempotency on payment webhooks)          |
+|             | - Only the backend ISSUER_ROLE can mint/burn AcmeUSD           |
+|             | - Private keys never exposed in code/config                    |
+|             | - Offramp payouts only after on-chain token burn confirmation  |
+| **Reliability** | - Stripe webhooks retried with idempotency, safe against replay |
+|             | - Database ensures traceability of all actions                 |
+|             | - Well-defined error/recovery handling for all failure modes   |
+|             | - Monitoring for failed/pending requests and backend wallet balances |
+
+---
+## UX 
+
+### Onramp User Journey: USD → AcmeUSD
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -67,7 +85,7 @@ This document outlines the design and implementation plan for building an onramp
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Offramp: AcmeUSD → USD
+### Offramp User Journey: AcmeUSD → USD
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -122,33 +140,117 @@ This document outlines the design and implementation plan for building an onramp
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Bank Account Linking Flow:**
-- On first withdrawal, user is prompted to link a bank account
-- Stripe Financial Connections opens a secure modal
-- User authenticates with their bank (Plaid-powered)
-- Bank account is saved to user's profile for future withdrawals
-- Payout is sent via ACH to the linked bank account
+### Wallet Integration
 
-**Why Bank Accounts (not cards)?**
-- Credit cards cannot receive payouts
-- Debit card payouts require Stripe Instant Payouts approval
-- Bank accounts via ACH are universally supported and reliable
+**Question**: How do users authenticate and sign transactions?
 
-### Key UX Principles
+**Decision**: Use `tempo.ts/wagmi` with `webAuthn()` connector for passkey wallets.
 
-| Principle | Implementation |
-|-----------|----------------|
-| **Zero token prerequisite** | Gas sponsorship means users need nothing to start |
-| **Familiar authentication** | Passkeys use Face ID/Touch ID - no seed phrases |
-| **Single token experience** | AcmeUSD pays for everything including fees |
-| **Minimal transactions** | Onramp: 0 user txs, Offramp: 1 user tx |
-| **Clear status tracking** | Users can verify onramp/ offramp progress in real-time |
+**Rationale**:
+- Assignment specifies: "All users will be using Tempo passkey wallets"
+- Tempo's SDK provides native WebAuthn support
+- P256 keypair created via device biometrics (Face ID, Touch ID, etc.)
+- Address derived from public key hash
 
+**Benefits**:
+- No seed phrases to manage or lose
+- No browser extensions required
+- No hardware wallets needed
+- Familiar authentication UX (biometrics)
+
+### Onramp Payment Provider 
+
+**Question**: Which payment rails for USD?
+
+| Option | Best For | Redirect? |
+|--------|----------|-----------|
+| **Stripe Elements + Link** ✓ | Embedded, one-click | No |
+| Stripe Checkout | Simple integration | Yes (leaves site) |
+| Plaid + ACH | Bank transfers | Yes |
+
+**Decision**: Stripe **Payment Element** (embedded) with **Link** enabled.
+
+**Why Embedded (No Redirect)?**
+- User stays on our single-page app
+- Works seamlessly with Framer Motion transitions
+- Link provides one-click checkout for returning users
+- Better UX than redirecting to stripe.com
+
+**How Link Works**:
+1. User enters email → Link checks if they have saved payment info
+2. If yes → One-click authentication (no card entry needed)
+3. If no → Standard card form, option to save to Link
+
+### Offramp Payout Strategy
+
+**Question**: How do users specify where to receive offramp payouts?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| Reuse onramp payment method | Zero friction | Credit cards can't receive payouts |
+| **Stripe Financial Connections** ✓ | Reliable bank payouts, secure | Extra linking step |
+| Stripe Connect | Full control | Complex onboarding, overkill for demo |
+
+**Decision**: Use Stripe Financial Connections to link bank accounts for payouts.
+
+**Rationale**:
+- Credit cards (most common onramp method) cannot receive payouts
+- Debit card payouts require special Stripe approval (Instant Payouts)
+- Bank accounts via ACH are universally supported
+- Financial Connections provides secure, Plaid-powered bank linking
+- One-time setup, then frictionless for future withdrawals
+
+**How It Works**:
+```
+First withdrawal (no bank linked):
+
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   User      │    │   Financial │    │   Bank      │
+│   clicks    │───▶│   Connections───▶│   account   │
+│   Withdraw  │    │   modal     │    │   linked    │
+└─────────────┘    └─────────────┘    └─────────────┘
+       │
+       ▼
+┌─────────────┐
+│   users     │
+│   table     │
+│   updated   │
+└─────────────┘
+
+Subsequent withdrawals:
+
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Offramp   │    │   Look up   │    │   ACH       │
+│   Request   │───▶│   linked    │───▶│   payout    │
+│             │    │   bank      │    │   initiated │
+└─────────────┘    └─────────────┘    └─────────────┘
+```
+
+### Gas Sponsorship
+
+**Question**: How do new users pay for gas when they have zero tokens?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **ACME sponsors all gas** ✓ | Zero friction onboarding | ACME bears cost |
+| Users acquire gas first | No cost to ACME | Terrible UX, blocks adoption |
+| Sponsor first tx only | Balanced | Added complexity |
+
+**Decision**: ACME sponsors all user gas fees using Tempo's Native AA `fee_payer_signature`.
+
+**Rationale**:
+- Users start with zero tokens after creating a passkey wallet
+- Without sponsorship, users cannot transact until they acquire a fee token
+- Tempo's Native AA transaction type supports gas sponsorship natively
+- Cost is minimal (~$0.001 per transaction)
+
+**Cost Considerations**:
+- Acceptable as user acquisition cost
+- Can add per-user rate limiting if needed, to prevent overuse of onramp/ offramp
 ---
+## Security
 
-## Key Design Decisions
-
-### 1. Token Architecture
+### Token Architecture
 
 **Question**: How should AcmeUSD be implemented?
 
@@ -176,7 +278,7 @@ Decimals:   6 (TIP-20 default)
 
 ---
 
-### 2. Mint/Burn Authority Model
+### Mint/Burn Authority Model
 
 **Question**: Who controls token supply?
 
@@ -200,9 +302,9 @@ Decimals:   6 (TIP-20 default)
 
 ---
 
-### 3. Ensuring 1:1 Backing
+### Ensuring 1:1 Backing
 
-**Question**: How do you guarantee supply equals deposits?
+**Question**: How do we guarantee supply equals deposits?
 
 **Decision**: Event-driven mint/burn with strict ordering.
 
@@ -232,96 +334,7 @@ Decimals:   6 (TIP-20 default)
 
 ---
 
-### 4. Gas Sponsorship Strategy
-
-**Question**: How do new users pay for gas when they have zero tokens?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **ACME sponsors all gas** ✓ | Zero friction onboarding | ACME bears cost |
-| Users acquire gas first | No cost to ACME | Terrible UX, blocks adoption |
-| Sponsor first tx only | Balanced | Added complexity |
-
-**Decision**: ACME sponsors all user gas fees using Tempo's Native AA `fee_payer_signature`.
-
-**Rationale**:
-- Users start with zero tokens after creating a passkey wallet
-- Without sponsorship, users cannot transact until they acquire a fee token
-- Tempo's Native AA transaction type supports gas sponsorship natively
-- Cost is minimal (~$0.001 per transaction)
-
-**Implementation** (using tempo.ts Fee Payer Relay):
-
-tempo.ts provides built-in support for fee sponsorship via the `withFeePayer` transport helper.
-
-**Frontend (Client Setup)**:
-```typescript
-import { createWalletClient } from 'viem';
-import { withFeePayer } from 'tempo.ts/viem';
-
-const client = createWalletClient({
-  transport: withFeePayer({
-    default: http(TEMPO_RPC_URL),
-    feePayer: {
-      transport: http('/api/sponsor'),  // Routes to our relay
-      policy: 'sponsorAndBroadcast',    // Relay signs AND broadcasts
-    },
-  }),
-});
-
-// When sending a transaction with feePayer: true
-// It automatically routes to our /api/sponsor endpoint
-```
-
-**Frontend (Sending Sponsored Transaction)**:
-```typescript
-import { Hooks } from 'tempo.ts/wagmi';
-
-function SendPayment() {
-  const sendPayment = Hooks.token.useTransferSync();
-  
-  const handleSend = () => {
-    sendPayment.mutate({
-      amount: parseUnits('50', 6),
-      to: treasuryAddress,
-      token: ACME_USD_ADDRESS,
-      feeToken: ALPHA_USD_ADDRESS,  // Fee paid in AlphaUSD
-      feePayer: true,               // ← Routes to relay!
-    });
-  };
-}
-```
-
-**Backend (Fee Payer Relay - `/api/sponsor/route.ts`)**:
-```typescript
-import { privateKeyToAccount } from 'viem/accounts';
-
-export async function POST(req: Request) {
-  const { transaction } = await req.json();
-  
-  // Backend sponsor account (secp256k1)
-  const sponsorAccount = privateKeyToAccount(
-    process.env.BACKEND_PRIVATE_KEY as `0x${string}`
-  );
-  
-  // Sign as fee payer and broadcast
-  // tempo.ts handles the fee_payer_signature construction
-  const txHash = await walletClient.sendTransaction({
-    ...transaction,
-    feePayer: sponsorAccount,
-  });
-  
-  return Response.json({ txHash });
-}
-```
-
-**Cost Considerations**:
-- Acceptable as user acquisition cost
-- Can add per-user rate limiting if needed, to prevent overuse of onramp/ offramp
-
----
-
-### 5. Offramp Tracking Mechanism
+### Offramp Tracking Mechanism
 
 **Question**: How do you link an on-chain transfer to an off-chain payout?
 
@@ -356,246 +369,112 @@ export async function POST(req: Request) {
 
 ---
 
-### 6. Payout Method Strategy
+## Reliability
 
-**Question**: How do users specify where to receive offramp payouts?
+This section outlines the strategies ensuring the AcmeUSD system operates reliably, handling failures gracefully and maintaining data consistency.
 
-| Option | Pros | Cons |
-|--------|------|------|
-| Reuse onramp payment method | Zero friction | Credit cards can't receive payouts |
-| **Stripe Financial Connections** ✓ | Reliable bank payouts, secure | Extra linking step |
-| Stripe Connect | Full control | Complex onboarding, overkill for demo |
+### Idempotency
 
-**Decision**: Use Stripe Financial Connections to link bank accounts for payouts.
+**Question**: How do we prevent duplicate operations (e.g., double-minting) on retries?
 
-**Rationale**:
-- Credit cards (most common onramp method) cannot receive payouts
-- Debit card payouts require special Stripe approval (Instant Payouts)
-- Bank accounts via ACH are universally supported
-- Financial Connections provides secure, Plaid-powered bank linking
-- One-time setup, then frictionless for future withdrawals
+**Decision**: Use unique idempotency keys stored in the database for all critical operations.
+
+| Operation | Idempotency Key | Storage |
+|-----------|-----------------|---------|
+| Onramp mint | Stripe `payment_intent_id` | `onramps.payment_intent_id` (unique) |
+| Offramp request | Generated `request_id` → hashed as `memo` | `offramps.memo` (unique) |
+| Webhook processing | Stripe event ID | Check before processing |
 
 **How It Works**:
 ```
-First withdrawal (no bank linked):
-
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   User      │    │   Financial │    │   Bank      │
-│   clicks    │───▶│   Connections───▶│   account   │
-│   Withdraw  │    │   modal     │    │   linked    │
-└─────────────┘    └─────────────┘    └─────────────┘
-       │
-       ▼
-┌─────────────┐
-                                      │   users     │
-                                      │   table     │
-                                      │   updated   │
-└─────────────┘
-
-Subsequent withdrawals:
-
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Offramp   │    │   Look up   │    │   ACH       │
-│   Request   │───▶│   linked    │───▶│   payout    │
-│             │    │   bank      │    │   initiated │
-└─────────────┘    └─────────────┘    └─────────────┘
+Webhook arrives → Check if payment_intent_id exists in DB
+  ├── Yes → Already processed, return 200 (safe to retry)
+  └── No  → Process payment, insert record, mint tokens
 ```
 
-**Implementation**:
-- `/api/bank/create-session` - Creates Financial Connections session
-- `/api/bank/save` - Saves linked bank account to user profile
-- `/api/bank/status` - Returns user's linked bank account details
-- `stripe_bank_account_id` column in `users` table
+This ensures Stripe can safely retry webhooks (up to 3 days) without causing duplicate mints.
 
-**Test Mode**:
-- Stripe provides simulated bank selection UI
-- Test routing number: `110000000`
-- Test account number: `000123456789`
+### State Machine Tracking
 
----
+**Question**: How do we track progress and recover from partial failures?
 
-### 7. Payment Provider Choice (Onramp)
+**Decision**: Use explicit state machines with database persistence for all flows.
 
-**Question**: Which payment rails for USD?
-
-| Option | Best For | Redirect? |
-|--------|----------|-----------|
-| **Stripe Elements + Link** ✓ | Embedded, one-click | No |
-| Stripe Checkout | Simple integration | Yes (leaves site) |
-| Plaid + ACH | Bank transfers | Yes |
-
-**Decision**: Stripe **Payment Element** (embedded) with **Link** enabled.
-
-**Why Embedded (No Redirect)?**
-- User stays on our single-page app
-- Works seamlessly with Framer Motion transitions
-- Link provides one-click checkout for returning users
-- Better UX than redirecting to stripe.com
-
-**How Link Works**:
-1. User enters email → Link checks if they have saved payment info
-2. If yes → One-click authentication (no card entry needed)
-3. If no → Standard card form, option to save to Link
-
-**Backend: Create Payment Intent**
-
-```typescript
-// app/api/onramp/create/route.ts
-import Stripe from 'stripe';
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-
-export async function POST(req: Request) {
-  const { amountUsd, userAddress } = await req.json();
-  
-  // Get or create Stripe Customer for this wallet
-  const user = await getOrCreateUser(supabase, userAddress);
-  let customerId = user.stripe_customer_id;
-  
-  if (!customerId) {
-    const customer = await stripe.customers.create({
-      metadata: { userAddress },
-    });
-    customerId = customer.id;
-    await updateUserStripeCustomer(supabase, userAddress, customerId);
-  }
-  
-  const paymentIntent = await stripe.paymentIntents.create({
-    amount: amountUsd * 100,  // cents
-    currency: 'usd',
-    customer: customerId,     // Link to customer for saved payment methods
-    metadata: { userAddress },
-    automatic_payment_methods: { enabled: true },
-    setup_future_usage: 'off_session',  // Save payment method for offramp payouts
-  });
-  
-  return Response.json({ 
-    clientSecret: paymentIntent.client_secret 
-  });
-}
+**Onramp States** (see [Database Schema](#database-schema)):
+```
+pending → paid → minting → minted
+                    ↓
+                  failed
 ```
 
-**Key Addition**: `setup_future_usage: 'off_session'` saves the payment method to the customer, enabling it to be used for offramp payouts later.
-
-**Frontend: Embedded Payment Form**
-
-```tsx
-// components/PaymentForm.tsx
-import { PaymentElement, useStripe, useElements } from '@stripe/react-stripe-js';
-
-function PaymentForm({ amount, onSuccess }: Props) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!stripe || !elements) return;
-    
-    setLoading(true);
-    const { error } = await stripe.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: window.location.href,  // Stay on same page
-      },
-      redirect: 'if_required',  // Only redirect if absolutely necessary
-    });
-    
-    if (error) {
-      console.error(error);
-    } else {
-      onSuccess();  // Transition to success view
-    }
-    setLoading(false);
-  };
-
-  return (
-    <form onSubmit={handleSubmit}>
-      <PaymentElement />
-      <button disabled={loading}>
-        {loading ? 'Processing...' : `Pay $${amount}`}
-      </button>
-    </form>
-  );
-}
+**Offramp States**:
 ```
-
-**App Setup (Stripe Provider)**
-
-```tsx
-// app/providers.tsx
-import { loadStripe } from '@stripe/stripe-js';
-import { Elements } from '@stripe/react-stripe-js';
-
-const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_KEY!);
-
-function StripeProvider({ clientSecret, children }) {
-  return (
-    <Elements stripe={stripePromise} options={{ clientSecret }}>
-      {children}
-    </Elements>
-  );
-}
+pending → transferred → burning → burned → paying → paid_out
+              ↓            ↓                  ↓
+           failed       failed             failed
 ```
-
-**Webhook (Same as Before)**
-
-```typescript
-// app/api/onramp/webhook/route.ts
-export async function POST(req: Request) {
-  const event = stripe.webhooks.constructEvent(...);
-  
-  if (event.type === 'payment_intent.succeeded') {
-    const { userAddress } = event.data.object.metadata;
-    const amount = event.data.object.amount / 100;
-    
-    // Mint AcmeUSD to user
-    await mintAcmeUSD(userAddress, amount);
-  }
-}
-```
-
-**Test Mode**:
-- Test card: `4242 4242 4242 4242`
-- Any future expiry, any CVC
-- Link: Any email, OTP = any 6 digits
-
-**Flow (No Redirect)**:
-```
-User enters amount → Payment form appears (in-app) → Pay → Success view
-                                   ↓
-                     (Link users: one-click, no card entry)
-```
-
----
-
-### 8. Wallet Integration
-
-**Question**: How do users authenticate and sign transactions?
-
-**Decision**: Use `tempo.ts/wagmi` with `webAuthn()` connector for passkey wallets.
-
-**Rationale**:
-- Assignment specifies: "All users will be using Tempo passkey wallets"
-- Tempo's SDK provides native WebAuthn support
-- P256 keypair created via device biometrics (Face ID, Touch ID, etc.)
-- Address derived from public key hash
 
 **Benefits**:
-- No seed phrases to manage or lose
-- No browser extensions required
-- No hardware wallets needed
-- Familiar authentication UX (biometrics)
+- Each state transition is atomic and logged
+- Failed operations can be identified and retried from the last successful state
+- Full audit trail for debugging and support
 
-**Implementation**:
-```typescript
-import { webAuthn } from 'tempo.ts/wagmi';
+### Ordered Operations
 
-const config = createConfig({
-  connectors: [webAuthn()],
-  chains: [tempo({ feeToken: ACME_USD_ADDRESS })],
-});
+**Question**: How do we ensure operations happen in the correct sequence?
+
+**Decision**: Enforce strict ordering with on-chain confirmation before proceeding.
+
+| Flow | Order Guarantee |
+|------|-----------------|
+| Onramp | Payment confirmed (webhook) → THEN mint tokens |
+| Offramp | Transfer confirmed (on-chain) → THEN burn → THEN payout |
+
+**Key Principle**: Never mint speculatively. Never payout before burn confirmation.
+
 ```
+Onramp:  [Stripe Payment] ──webhook──▶ [Verify] ──▶ [Mint] ──▶ [Confirm on-chain]
+                                          ↑
+                                   Only proceed if
+                                   payment_intent.succeeded
+
+Offramp: [User Transfer] ──event──▶ [Verify memo] ──▶ [Burn] ──▶ [Confirm burn] ──▶ [Payout]
+                                         ↑                            ↑
+                                  Match to request             Wait for tx receipt
+```
+
+### Error Recovery
+
+**Question**: How do we handle failures at each stage?
+
+**Decision**: Define clear recovery paths for all failure modes (see [Error Handling & Recovery](#error-handling--recovery) for full details).
+
+| Failure Point | State | Recovery Strategy |
+|---------------|-------|-------------------|
+| Stripe payment fails | `pending` → `failed` | User retries payment |
+| Mint tx fails | `paid` → `failed` | Manual retry or refund |
+| User never transfers | `pending` (stale) | Auto-expire after 24h |
+| Burn tx fails | `transferred` → `failed` | Manual burn + retry |
+| Payout fails | `burned` → `failed` | Manual Stripe payout (burn is proof) |
+
+**Partial Failure Handling**:
+- If burn succeeds but payout fails → We have on-chain proof of burn, can retry payout manually
+- If transfer detected but memo invalid → Ignore, user contacts support
+- If webhook arrives before DB record → Return 500, Stripe retries later
+
+### Monitoring & Alerting (Production only, out of scope for demo)
+
+**Question**: How do we detect issues before they become critical?
+
+**Decision**: Monitor key metrics and alert on anomalies (see [Monitoring](#monitoring) for full details).
+
+| What We Monitor | Why | Alert Threshold |
+|-----------------|-----|-----------------|
+| Failed status count | Requires intervention | Any `failed` status |
+| Stale pending requests | Stuck in pipeline | Onramp > 10 min, Offramp > 1 hr |
+| Backend wallet balance | System operability | AlphaUSD < 100 |
+| Error rate | System health | > 5% in 1hr window |
+
 
 ---
 
@@ -650,7 +529,7 @@ const config = createConfig({
 
 ---
 
-## API Endpoints
+## API Endpoints Design
 
 ### Onramp Endpoints
 
@@ -809,45 +688,6 @@ This endpoint implements the **Fee Payer Relay** pattern from tempo.ts. The `wit
 }
 ```
 
-**Implementation**:
-```typescript
-// app/api/sponsor/route.ts
-import { createWalletClient, http } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-import { tempo } from 'tempo.ts/chains';
-
-const sponsorAccount = privateKeyToAccount(
-  process.env.BACKEND_PRIVATE_KEY as `0x${string}`
-);
-
-const walletClient = createWalletClient({
-  account: sponsorAccount,
-  chain: tempo({ feeToken: process.env.ALPHA_USD_ADDRESS }),
-  transport: http(process.env.TEMPO_RPC_URL),
-});
-
-export async function POST(req: Request) {
-  try {
-    const { transaction } = await req.json();
-    
-    // Sign as fee payer and broadcast
-    const txHash = await walletClient.sendTransaction({
-      ...transaction,
-      feePayer: sponsorAccount,
-      feeToken: process.env.ALPHA_USD_ADDRESS,  // Pay fees in AlphaUSD
-    });
-    
-    return Response.json({ txHash });
-  } catch (error) {
-    console.error('Sponsorship failed:', error);
-    return Response.json(
-      { error: 'Failed to sponsor transaction' },
-      { status: 500 }
-    );
-  }
-}
-```
-
 ### Utility Endpoints
 
 | Endpoint | Method | Description |
@@ -865,121 +705,59 @@ The database serves two critical functions:
 1. **Idempotency** - Prevent double-minting on webhook retries
 2. **Request Tracking** - Match on-chain transfers to offramp requests via memo
 
-### Schema
+### Data Ontology Specification
 
-```sql
--- Track users, Stripe Customer IDs, and linked bank accounts
-CREATE TABLE users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  wallet_address TEXT UNIQUE NOT NULL,
-  stripe_customer_id TEXT UNIQUE,
-  stripe_bank_account_id TEXT,           -- Linked bank account for withdrawals
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+This section defines the key entities, their properties, and relationships for the AcmeUSD backend system. This is a *conceptual* (not technical or implementation-specific) definition of the data objects and their roles in the product.
 
--- Track onramp payments (prevents double-mint)
-CREATE TABLE onramps (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  payment_intent_id TEXT UNIQUE NOT NULL, -- Idempotency key (pi_xxx)
-  user_address TEXT NOT NULL,
-  amount_usd INTEGER NOT NULL,            -- Amount in cents
-  status TEXT DEFAULT 'pending',          -- pending, paid, minting, minted, failed
-  mint_tx_hash TEXT,
-  error_message TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+#### Entity: User
 
--- Track offramp requests (matches memo to payout)
-CREATE TABLE offramps (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  memo TEXT UNIQUE NOT NULL,              -- 32-byte memo hash (0x...)
-  user_address TEXT NOT NULL,
-  amount_usd INTEGER NOT NULL,            -- Amount in cents
-  status TEXT DEFAULT 'pending',          -- pending, transferred, burning, burned, paying, paid_out, failed
-  transfer_tx_hash TEXT,
-  burn_tx_hash TEXT,
-  stripe_payout_id TEXT,
-  error_message TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+- **Description**: Represents an individual user of AcmeUSD, uniquely identified by their wallet address. Stores payment and payout linkage.
+- **Properties**:
+  - *ID*: Unique identifier for the user.
+  - *Wallet Address*: Unique wallet address associated with the user (acts as the main user handle).
+  - *Stripe Customer ID*: Reference to the corresponding user in the Stripe system.
+  - *Linked Bank Account ID*: Reference to the user's bank account for withdrawal payouts (as stored in Stripe).
+  - *Created At*: Timestamp when the user record was created.
+  - *Updated At*: Timestamp of the last modification to the user record.
 
--- Indexes for common queries
-CREATE INDEX idx_onramps_user ON onramps(user_address);
-CREATE INDEX idx_onramps_status ON onramps(status);
-CREATE INDEX idx_offramps_user ON offramps(user_address);
-CREATE INDEX idx_offramps_memo ON offramps(memo);
-CREATE INDEX idx_offramps_status ON offramps(status);
+#### Entity: Onramp Payment
 
--- Auto-update updated_at timestamp
-CREATE OR REPLACE FUNCTION update_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+- **Description**: Captures an inbound payment initiated by a user to purchase AcmeUSD (fiat → token). Each onramp action tracks payment status and minting lifecycle.
+- **Properties**:
+  - *ID*: Unique identifier for the onramp payment attempt.
+  - *Payment Intent ID*: The idempotency key from Stripe (unique per payment attempt).
+  - *User Address*: The wallet address corresponding to the user initiating the onramp.
+  - *Amount (USD)*: Amount (in cents) being purchased and minted.
+  - *Status*: Current stage in onramp process (e.g., pending, paid, minting, minted, failed).
+  - *Mint Transaction Hash*: On-chain transaction hash of the mint operation (if completed).
+  - *Error Message*: Optional message explaining failure, if applicable.
+  - *Created At*: When the payment was initiated.
+  - *Updated At*: Last update to the onramp record.
 
-CREATE TRIGGER users_updated_at
-  BEFORE UPDATE ON users
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+#### Entity: Offramp Request
 
-CREATE TRIGGER onramps_updated_at
-  BEFORE UPDATE ON onramps
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+- **Description**: Represents a user's request to withdraw AcmeUSD to fiat (token → bank transfer). Tracks linkage to on-chain transfer and off-chain payout status.
+- **Properties**:
+  - *ID*: Unique identifier for the offramp request.
+  - *Memo*: Unique memo (32-byte hash, derived from a unique request id) linking the on-chain transfer to the offramp request.
+  - *User Address*: The wallet address of the user making the withdrawal.
+  - *Amount (USD)*: Amount (in cents) being withdrawn or paid out.
+  - *Status*: Current state of the offramp process (e.g., pending, transferred, burning, burned, paying, paid_out, failed).
+  - *Transfer Transaction Hash*: Hash of the on-chain transfer transaction (if relevant).
+  - *Burn Transaction Hash*: Hash of the on-chain burn transaction (if relevant).
+  - *Stripe Payout ID*: Reference to the payout operation in Stripe (if/when payout occurs).
+  - *Error Message*: Optional explanation for process failure.
+  - *Created At*: When the offramp was initiated.
+  - *Updated At*: Last update to the offramp record.
 
-CREATE TRIGGER offramps_updated_at
-  BEFORE UPDATE ON offramps
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+#### Relationships and Indexing
 
--- Note: Rate limiting table omitted for demo (assumes legitimate users)
--- In production, add sponsored_transactions table to prevent gas drain
-```
+- Each **User** may have multiple **Onramp Payments** and **Offramp Requests** associated by wallet address.
+- The **Memo** field in the Offramp Request provides a unique, verifiable mapping between on-chain activity and application-level withdrawal requests.
+- The **Stripe Customer ID** and **Stripe Bank Account ID** provide linkage to Stripe's payment and payout systems.
 
-### Users Table Purpose
 
-The `users` table links wallet addresses to Stripe data, enabling:
-1. **Stripe Customer** - Links wallet to Stripe Customer for payment processing
-2. **Bank Account Linking** - Stores linked bank account ID for withdrawal payouts
-3. **Returning User UX** - Stripe Link provides one-click checkout for known customers
-
-### Supabase Client Usage
-
-```typescript
-import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!  // Use service key for backend
-);
-
-// Example: Create onramp record
-const { data, error } = await supabase
-  .from('onramps')
-  .insert({
-    payment_intent_id: paymentIntent.id,
-    user_address: userAddress,
-    amount_usd: amountCents,
-    status: 'pending'
-  })
-  .select()
-  .single();
-
-// Example: Check idempotency (in webhook handler)
-const { data: existing } = await supabase
-  .from('onramps')
-  .select()
-  .eq('payment_intent_id', paymentIntentId)
-  .single();
-
-if (existing?.status === 'minted') {
-  return; // Already processed, skip
-}
-```
-
-### State Machines
+### State Changes
 
 **Onramp States:**
 ```
@@ -1008,25 +786,6 @@ pending → transferred → burning → burned → paying → paid_out
 | Webhook delivery fails | Stripe retries (up to 3 days) | Idempotency key prevents duplicates | Automatic via retry |
 | Duplicate webhook | Check `stripe_session_id` exists | Skip processing, return 200 | Already handled |
 
-**Mint Failure Recovery:**
-```typescript
-async function handleMintFailure(onrampId: string, error: Error) {
-  // 1. Update database
-  await db.update('onramps', { 
-    id: onrampId, 
-    status: 'failed',
-    error_message: error.message 
-  });
-  
-  // 2. Log for manual review
-  logger.error('Mint failed', { onrampId, error });
-  
-  // 3. Alert (in production)
-  // await alertOps('Mint failure requires review', { onrampId });
-  
-  // 4. Options: manual retry or Stripe refund
-}
-```
 
 ### Offramp Error Scenarios
 
@@ -1040,20 +799,6 @@ async function handleMintFailure(onrampId: string, error: Error) {
 | Insufficient balance | Transfer reverts on-chain | No status change | User checks balance |
 | Bank account disconnected | Stripe API error on payout | Status: `failed` | User re-links bank account |
 
-**Offramp Failure Recovery:**
-```typescript
-async function handleOfframpFailure(offrampId: string, stage: string, error: Error) {
-  await db.update('offramps', {
-    id: offrampId,
-    status: 'failed',
-    error_message: `Failed at ${stage}: ${error.message}`
-  });
-  
-  // If tokens were received but burn/payout failed,
-  // we have proof via transfer_tx_hash
-  // Manual intervention required
-}
-```
 
 ### Gas Sponsorship Errors
 
@@ -1064,18 +809,6 @@ async function handleOfframpFailure(offrampId: string, stage: string, error: Err
 | Malformed transaction | RLP decode fails | Return 400, reject request |
 
 > **Note**: Rate limiting is omitted for the demo given the "all users are legitimate" assumption. In production, implement per-address rate limits (e.g., 10 txs/hour, 100 txs/day) to prevent accidental or intentional gas drain.
-
-### Monitoring (Production)
-
-For the demo, basic console logging is sufficient. In production, monitor:
-
-| Metric | Threshold | Action |
-|--------|-----------|--------|
-| Failed mints | > 0 in 1 hour | Alert + manual review |
-| Failed offramps | > 0 in 1 hour | Alert + manual review |
-| Backend wallet balance | < 10 linkingUSD | Alert + refill |
-
----
 
 ## Security Considerations
 
@@ -1112,214 +845,103 @@ For the demo, basic console logging is sufficient. In production, monitor:
 - Proper secrets management (AWS KMS, HashiCorp Vault)
 - Chargeback handling and dispute resolution
 - Instant payouts to debit cards (requires Stripe approval)
+---
+
+## Testing Requirements
+
+### Key Test Scenarios
+
+#### Onramp
+
+| Scenario | Expected Outcome |
+|----------|------------------|
+| Happy path: user pays, webhook fires | AcmeUSD minted to user wallet |
+| Duplicate webhook (same session_id) | Mint happens only once (idempotency) |
+| Payment fails (card declined) | Status set to `failed`, no mint |
+| Webhook arrives before DB record | Graceful handling, retry succeeds |
+
+#### Offramp
+
+| Scenario | Expected Outcome |
+|----------|------------------|
+| Happy path: bank linked, transfer with memo | Tokens burned, ACH payout initiated |
+| No bank account linked | UI blocks withdrawal, prompts linking |
+| Bank linking succeeds | Account saved, user can proceed |
+| Transfer with unknown memo | Ignored (no matching request) |
+| User sends wrong amount | Still process (amount from request, not transfer) |
+| Request expires (no transfer in 24h) | Status set to `expired` |
+| Burn fails after transfer detected | Status `failed`, manual recovery needed |
+
+#### Gas Sponsorship
+
+| Scenario | Expected Outcome |
+|----------|------------------|
+| User with zero balance sends sponsored tx | Transaction succeeds, fee deducted from backend |
+| Invalid user signature | 400 error, transaction rejected |
+| Backend wallet out of AlphaUSD | Graceful error, alert ops |
+
+#### Edge Cases
+
+| Scenario | Expected Outcome |
+|----------|------------------|
+| Concurrent onramps from same user | Both processed independently |
+| Concurrent offramps (different memos) | Both tracked separately |
+| Very large amount ($999,999) | Handled within limits |
+| Negative or zero amount | Validation rejects |
+| Invalid wallet address | Validation rejects |
+| RPC timeout during mint | Retry logic, eventual consistency |
 
 ---
 
-## Testnet Configuration
+## Monitoring
 
-| Resource | Value |
-|----------|-------|
-| RPC URL | `https://dreamy-northcutt:recursing-payne@rpc.testnet.tempo.xyz` |
-| Explorer | `https://explore.tempo.xyz` (credentials: eng:zealous-mayer) |
-| TIP20Factory | `0x20Fc000000000000000000000000000000000000` |
-| TIP403Registry | `0x403c000000000000000000000000000000000000` |
-| StablecoinExchange | `0xdec0000000000000000000000000000000000000` |
+### Key Product Metrics
 
-### Faucet Tokens
+| Metric | Source | Why It Matters |
+|--------|--------|----------------|
+| Onramp success rate | DB: `onramps` table | Core business health |
+| Offramp success rate | DB: `offramps` table | Core business health |
+| Avg mint latency | Webhook → mint confirmed | User experience |
+| Backend wallet balance | On-chain query | System operability |
+| Failed transactions | DB: status = `failed` | Requires intervention |
+| Pending requests > 1hr | DB query | Stuck in pipeline |
 
-The testnet faucet (`tempo_fundAddress` RPC method) provides:
+### Alerts (Production)
 
-| Asset | Address | Amount |
-|-------|---------|-------:|
-| LinkingUSD | `0x20c0000000000000000000000000000000000000` | 1M |
-| AlphaUSD | `0x20c0000000000000000000000000000000000001` | 1M |
-| BetaUSD | `0x20c0000000000000000000000000000000000002` | 1M |
-| ThetaUSD | `0x20c0000000000000000000000000000000000003` | 1M |
+| Condition | Severity | Action |
+|-----------|----------|--------|
+| Any `failed` status | High | Investigate immediately |
+| Backend AlphaUSD < 100 | High | Refill wallet |
+| Pending onramp > 10 min | Medium | Check Stripe/webhook |
+| Pending offramp > 1 hr | Medium | Check event listener |
+| Error rate > 5% (1hr window) | High | Investigate root cause |
 
-**Important**: Validators on testnet expect **AlphaUSD** as their fee token. This affects the Fee AMM liquidity requirements.
+## Appendix
 
----
+### Deployment & Setup
 
-## Deployment & Setup
+#### High-Level Steps
 
-### Prerequisites
+1. **Generate Backend Wallet:**  
+   Create a backend wallet with a secp256k1 (Ethereum-style) private key. This wallet will mint/burn tokens and sponsor user gas fees.
 
-Before the system can function, the following setup steps must be completed:
+2. **Fund the Wallet:**  
+   Use the testnet faucet to deposit AlphaUSD and other required tokens into the backend wallet so it can pay transaction fees and operate the system.
 
-### Step 1: Generate Backend Wallet (secp256k1)
+3. **Deploy AcmeUSD Token:**  
+   Deploy the AcmeUSD TIP-20 token contract on Tempo testnet. The backend wallet should be set as the administrator with minting authority.
 
-The backend wallet is used for:
-- Holding `ISSUER_ROLE` (mint/burn AcmeUSD)
-- Signing as `fee_payer` for gas sponsorship
-- Paying gas fees for mint/burn operations
+4. **Assign Roles:**  
+   Give the backend wallet the necessary roles (e.g., ISSUER_ROLE) to mint and burn AcmeUSD.
 
-**Important**: The fee payer signature **must be secp256k1** (not P256/passkey). Generate a standard Ethereum private key.
+5. **Configure Fee Payment:**  
+   Ensure there is sufficient liquidity and fee setup so that user transactions succeed and the backend can sponsor gas for users (using AlphaUSD as the fee token if needed).
 
-```typescript
-import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-
-// Generate and save securely (do this once, store in env)
-const privateKey = generatePrivateKey();
-const account = privateKeyToAccount(privateKey);
-console.log('Backend wallet address:', account.address);
-// Store privateKey in BACKEND_PRIVATE_KEY env var
-```
-
-### Step 2: Fund Backend Wallet via Faucet
-
-The backend wallet needs tokens to pay for gas when minting/burning.
-
-```typescript
-import { createPublicClient, http } from 'viem';
-
-const client = createPublicClient({
-  transport: http('https://dreamy-northcutt:recursing-payne@rpc.testnet.tempo.xyz')
-});
-
-// Fund the backend wallet with testnet tokens
-await client.request({
-  method: 'tempo_fundAddress',
-  params: [backendWalletAddress]
-});
-
-// This gives:
-// - 1M LinkingUSD (for quoteToken requirement)
-// - 1M AlphaUSD (validator's fee token)
-// - 1M BetaUSD, ThetaUSD
-```
-
-### Step 3: Deploy AcmeUSD Token
-
-Deploy via TIP20Factory:
-
-```typescript
-import { createWalletClient, http } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-
-const account = privateKeyToAccount(process.env.BACKEND_PRIVATE_KEY);
-const walletClient = createWalletClient({
-  account,
-  transport: http('https://dreamy-northcutt:recursing-payne@rpc.testnet.tempo.xyz')
-});
-
-const TIP20_FACTORY = '0x20Fc000000000000000000000000000000000000';
-const LINKING_USD = '0x20c0000000000000000000000000000000000000';
-
-// Deploy AcmeUSD
-const txHash = await walletClient.writeContract({
-  address: TIP20_FACTORY,
-  abi: TIP20_FACTORY_ABI,
-  functionName: 'createToken',
-  args: [
-    'AcmeUSD',           // name
-    'AUSD',              // symbol
-    'USD',               // currency (required for fee payment)
-    LINKING_USD,         // quoteToken (required for USD tokens)
-    account.address      // admin (receives DEFAULT_ADMIN_ROLE)
-  ]
-});
-
-// Get deployed token address from event
-const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-// Parse TokenCreated event to get AcmeUSD address
-```
-
-**Token Address**: The deployed AcmeUSD will have an address like `0x20c0000000000000000000000000000000000004` (next available TIP-20 ID).
-
-### Step 4: Grant ISSUER_ROLE to Backend
-
-The deployer (admin) already has DEFAULT_ADMIN_ROLE. Grant ISSUER_ROLE:
-
-```typescript
-const ISSUER_ROLE = keccak256(toBytes('ISSUER_ROLE'));
-
-await walletClient.writeContract({
-  address: ACME_USD_ADDRESS,
-  abi: TIP20_ABI,
-  functionName: 'grantRole',
-  args: [ISSUER_ROLE, account.address]
-});
-```
-
-### Step 5: Fee AMM Liquidity (CRITICAL)
-
-**Problem**: For users to pay fees in AcmeUSD, there must be liquidity on the Fee AMM to convert AcmeUSD → AlphaUSD (validator's preferred token).
-
-**Current Understanding**: The Fee AMM liquidity provisioning mechanism needs to be verified. Options:
-1. The Stablecoin Exchange may automatically provide fee conversion
-2. May need to explicitly add liquidity to a Fee AMM pool
-
-**For Demo**: If Fee AMM liquidity is complex, alternative approaches:
-- Backend pays fees in AlphaUSD (which it has from faucet) instead of AcmeUSD
-- Or use the transaction-level `fee_token` field to specify AlphaUSD
-
-```typescript
-// Option: Backend specifies fee_token as AlphaUSD when sponsoring
-const tx = {
-  // ... transaction fields
-  feeToken: ALPHA_USD_ADDRESS,  // Use AlphaUSD for fees
-};
-```
-
-**TODO**: Verify Fee AMM liquidity requirements with Tempo documentation or testnet experimentation.
-
-### Step 6: (Optional) Create Stablecoin Exchange Pair
-
-If you want AcmeUSD tradeable on the DEX:
-
-```typescript
-const EXCHANGE = '0xdec0000000000000000000000000000000000000';
-
-await walletClient.writeContract({
-  address: EXCHANGE,
-  abi: EXCHANGE_ABI,
-  functionName: 'createPair',
-  args: [ACME_USD_ADDRESS]  // Creates AcmeUSD/LinkingUSD pair
-});
-```
-
-### Setup Checklist
-
-```
-[ ] 1. Generate backend secp256k1 private key
-[ ] 2. Store private key in environment variable
-[ ] 3. Fund backend wallet via faucet
-[ ] 4. Deploy AcmeUSD token
-[ ] 5. Record AcmeUSD contract address
-[ ] 6. Grant ISSUER_ROLE to backend wallet
-[ ] 7. Verify fee payment works (test transaction)
-[ ] 8. (Optional) Create exchange pair
-```
-
-### Environment Variables
-
-```env
-# Backend Wallet
-BACKEND_PRIVATE_KEY=0x...
-
-# Tempo Testnet
-TEMPO_RPC_URL=https://dreamy-northcutt:recursing-payne@rpc.testnet.tempo.xyz
-
-# Contract Addresses
-ACME_USD_ADDRESS=0x...  # After deployment
-TREASURY_ADDRESS=0x...   # Same as backend wallet
-
-# Token Addresses (from faucet)
-LINKING_USD_ADDRESS=0x20c0000000000000000000000000000000000000
-ALPHA_USD_ADDRESS=0x20c0000000000000000000000000000000000001
-
-# Stripe (test mode)
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
-
-# Supabase
-SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_SERVICE_KEY=eyJ...
-```
+These steps must be completed before running the full onramp/offramp demo.
 
 ---
 
-## Fee Payment Flow
+### Fee Payment Flow
 
 Understanding how fees work when users transact with AcmeUSD:
 
@@ -1375,217 +997,3 @@ This means:
 - Fee payer (backend): **Must be secp256k1** ✓
 
 The backend wallet signs using standard Ethereum signing (ecrecover-compatible).
-
----
-
-## UI Wireframes
-
-Single-page app with Framer Motion transitions. All views rendered in one container.
-
-### View States
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         SINGLE PAGE                             │
-│                                                                 │
-│   state: 'landing' | 'dashboard' | 'add' | 'withdraw' | 'success'
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │                                                         │   │
-│   │              <AnimatePresence mode="wait">              │   │
-│   │                                                         │   │
-│   │                  { currentView }                        │   │
-│   │                                                         │   │
-│   │              </AnimatePresence>                         │   │
-│   │                                                         │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### States
-
-```
-LANDING                 DASHBOARD               ADD / WITHDRAW
-┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│             │         │    0x1a..4d │         │  ←          │
-│    ACME     │         │             │         │             │
-│             │  ────▶  │   $150.00   │  ────▶  │  $ [100]    │
-│ [Get Started]         │             │         │             │
-│             │         │ [Add] [Out] │         │   [Pay]     │
-└─────────────┘         └─────────────┘         └─────────────┘
-                              ▲                       │
-                              │                       │
-                              │     SUCCESS           ▼
-                              │   ┌─────────────┐
-                              │   │             │
-                              └───│      ✓      │
-                                  │             │
-                                  └─────────────┘
-```
-
-### Implementation
-
-```tsx
-type View = 'landing' | 'dashboard' | 'add' | 'withdraw' | 'success'
-
-function App() {
-  const [view, setView] = useState<View>('landing')
-  const { isConnected } = useAccount()
-  
-  // Auto-transition on wallet connect
-  useEffect(() => {
-    if (isConnected) setView('dashboard')
-  }, [isConnected])
-
-  return (
-    <div className="h-screen flex items-center justify-center">
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={view}
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -20 }}
-          transition={{ duration: 0.2 }}
-        >
-          {view === 'landing' && <Landing />}
-          {view === 'dashboard' && <Dashboard onAdd={() => setView('add')} onWithdraw={() => setView('withdraw')} />}
-          {view === 'add' && <AddFunds onBack={() => setView('dashboard')} onSuccess={() => setView('success')} />}
-          {view === 'withdraw' && <Withdraw onBack={() => setView('dashboard')} onSuccess={() => setView('success')} />}
-          {view === 'success' && <Success onDone={() => setView('dashboard')} />}
-        </motion.div>
-      </AnimatePresence>
-    </div>
-  )
-}
-```
-
-### Transitions
-
-| From → To | Animation |
-|-----------|-----------|
-| landing → dashboard | Fade + scale up (wallet connected) |
-| dashboard → add/withdraw | Slide right |
-| add/withdraw → dashboard | Slide left (back) |
-| any → success | Fade + scale |
-| success → dashboard | Fade |
-
----
-
-## Testing Plan
-
-### Key Test Scenarios
-
-#### Onramp
-
-| Scenario | Expected Outcome |
-|----------|------------------|
-| Happy path: user pays, webhook fires | AcmeUSD minted to user wallet |
-| Duplicate webhook (same session_id) | Mint happens only once (idempotency) |
-| Payment fails (card declined) | Status set to `failed`, no mint |
-| Webhook arrives before DB record | Graceful handling, retry succeeds |
-
-#### Offramp
-
-| Scenario | Expected Outcome |
-|----------|------------------|
-| Happy path: bank linked, transfer with memo | Tokens burned, ACH payout initiated |
-| No bank account linked | UI blocks withdrawal, prompts linking |
-| Bank linking succeeds | Account saved, user can proceed |
-| Transfer with unknown memo | Ignored (no matching request) |
-| User sends wrong amount | Still process (amount from request, not transfer) |
-| Request expires (no transfer in 24h) | Status set to `expired` |
-| Burn fails after transfer detected | Status `failed`, manual recovery needed |
-
-#### Gas Sponsorship
-
-| Scenario | Expected Outcome |
-|----------|------------------|
-| User with zero balance sends sponsored tx | Transaction succeeds, fee deducted from backend |
-| Invalid user signature | 400 error, transaction rejected |
-| Backend wallet out of AlphaUSD | Graceful error, alert ops |
-
-#### Edge Cases
-
-| Scenario | Expected Outcome |
-|----------|------------------|
-| Concurrent onramps from same user | Both processed independently |
-| Concurrent offramps (different memos) | Both tracked separately |
-| Very large amount ($999,999) | Handled within limits |
-| Negative or zero amount | Validation rejects |
-| Invalid wallet address | Validation rejects |
-| RPC timeout during mint | Retry logic, eventual consistency |
-
-### Test Types
-
-| Type | Purpose | Tools |
-|------|---------|-------|
-| Unit | Memo generation, validation | Vitest |
-| Integration | API routes + DB + mocks | Vitest |
-| Contract | On-chain mint/burn/transfer | Vitest + viem |
-| E2E | Full user flows | Playwright |
-
----
-
-## Monitoring
-
-### Key Metrics
-
-| Metric | Source | Why It Matters |
-|--------|--------|----------------|
-| Onramp success rate | DB: `onramps` table | Core business health |
-| Offramp success rate | DB: `offramps` table | Core business health |
-| Avg mint latency | Webhook → mint confirmed | User experience |
-| Backend wallet balance | On-chain query | System operability |
-| Failed transactions | DB: status = `failed` | Requires intervention |
-| Pending requests > 1hr | DB query | Stuck in pipeline |
-
-### Alerts (Production)
-
-| Condition | Severity | Action |
-|-----------|----------|--------|
-| Any `failed` status | High | Investigate immediately |
-| Backend AlphaUSD < 100 | High | Refill wallet |
-| Pending onramp > 10 min | Medium | Check Stripe/webhook |
-| Pending offramp > 1 hr | Medium | Check event listener |
-| Error rate > 5% (1hr window) | High | Investigate root cause |
-
-### Dashboard Queries
-
-```sql
--- Onramp funnel (last 24h)
-SELECT status, COUNT(*) 
-FROM onramps 
-WHERE created_at > NOW() - INTERVAL '24 hours'
-GROUP BY status;
-
--- Offramp funnel (last 24h)
-SELECT status, COUNT(*) 
-FROM offramps 
-WHERE created_at > NOW() - INTERVAL '24 hours'
-GROUP BY status;
-
--- Stuck requests
-SELECT * FROM onramps 
-WHERE status = 'pending' 
-AND created_at < NOW() - INTERVAL '10 minutes';
-
-SELECT * FROM offramps 
-WHERE status = 'pending' 
-AND created_at < NOW() - INTERVAL '1 hour';
-```
-
-### For Demo
-
-Console logging is sufficient. Key logs:
-
-```
-[ONRAMP] Created session_id=cs_xxx user=0x... amount=100
-[ONRAMP] Webhook received session_id=cs_xxx
-[ONRAMP] Minted tx=0x... user=0x... amount=100
-[OFFRAMP] Created memo=0x... user=0x... amount=50
-[OFFRAMP] Transfer detected memo=0x... tx=0x...
-[OFFRAMP] Burned tx=0x... amount=50
-[SPONSOR] Sponsored tx=0x... user=0x... fee=0.001
-```
-
