@@ -144,6 +144,13 @@ This document outlines the design and implementation plan for building an onramp
 
 **Question**: How do users authenticate and sign transactions?
 
+| Option | Pros | Cons |
+|--------|------|------|
+| **Tempo Passkey Wallet** ✓ | No extensions, no seed phrases, biometric auth (Face ID/Touch ID), works on any device | Tempo-specific, less portable across chains |
+| MetaMask / Browser Extension | Universal, widely adopted, multi-chain | Requires install, seed phrase management, intimidating for non-crypto users |
+| WalletConnect | Mobile-first, supports many wallets | Extra step (QR scan), assumes user has a wallet app |
+| Custodial (email/password) | Familiar logn | Additional overhead over passkey only method|
+
 **Decision**: Use `tempo.ts/wagmi` with `webAuthn()` connector for passkey wallets.
 
 **Rationale**:
@@ -151,22 +158,25 @@ This document outlines the design and implementation plan for building an onramp
 - Tempo's SDK provides native WebAuthn support
 - P256 keypair created via device biometrics (Face ID, Touch ID, etc.)
 - Address derived from public key hash
+- **Accessibility for non-crypto users**: No wallet setup, no seed phrases, no browser extensions—just biometrics they already use
 
 **Benefits**:
 - No seed phrases to manage or lose
 - No browser extensions required
 - No hardware wallets needed
 - Familiar authentication UX (biometrics)
+- Zero onboarding friction for mainstream users
 
 ### Onramp Payment Provider 
 
 **Question**: Which payment rails for USD?
 
-| Option | Best For | Redirect? |
-|--------|----------|-----------|
-| **Stripe Elements + Link** ✓ | Embedded, one-click | No |
-| Stripe Checkout | Simple integration | Yes (leaves site) |
-| Plaid + ACH | Bank transfers | Yes |
+| Option | Pros | Cons |
+|--------|------|------|
+| **Stripe Elements + Link** ✓ | Embedded in-app, one-click for returning users, no redirect, card + Apple/Google Pay | More integration work than Checkout |
+| Stripe Checkout | Simple integration, hosted by Stripe, PCI compliant out of box | Redirects user away from app, less seamless UX |
+| Plaid + ACH | Lower fees, direct bank transfers | Slower (1-3 days), redirect required, more complex setup |
+| Crypto onramps (MoonPay, Transak) | Crypto-native users familiar with flow | High fees, KYC friction, overkill for fiat stablecoin |
 
 **Decision**: Stripe **Payment Element** (embedded) with **Link** enabled.
 
@@ -371,11 +381,32 @@ Decimals:   6 (TIP-20 default)
 
 ## Reliability
 
-This section outlines the strategies ensuring the AcmeUSD system operates reliably, handling failures gracefully and maintaining data consistency.
+**Question**: How do we ensure operations complete reliably across payments, blockchain, and payouts?
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Event-driven + Idempotency + State Machines** ✓ | Handles retries safely, recoverable from any failure point, full audit trail | More complex than fire-and-forget |
+| Synchronous request/response | Simple to implement, immediate feedback | No retry safety, partial failures unrecoverable |
+| Message queue (Kafka, SQS) | High throughput, guaranteed delivery | Infrastructure overhead, overkill for demo scope |
+| No reliability measures | Fastest to build | Double-mints, lost payouts, no debugging capability |
+
+**Decision**: Event-driven architecture with idempotency keys, explicit state machines, and ordered operations.
+
+**Rationale**:
+- Webhooks and blockchain events are inherently async—we must handle retries safely
+- Partial failures (e.g., burn succeeds, payout fails) need clear recovery paths
+- State machines provide audit trail and enable retry from last known good state
+- Avoids message queue complexity while maintaining reliability guarantees
 
 ### Idempotency
 
 **Question**: How do we prevent duplicate operations (e.g., double-minting) on retries?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Database unique constraints** ✓ | Simple, atomic, leverages existing DB | Requires careful key design |
+| Distributed locks (Redis) | Works across services | Additional infrastructure, lock expiry edge cases |
+| In-memory deduplication | Fast | Lost on restart, doesn't scale horizontally |
 
 **Decision**: Use unique idempotency keys stored in the database for all critical operations.
 
@@ -383,98 +414,58 @@ This section outlines the strategies ensuring the AcmeUSD system operates reliab
 |-----------|-----------------|---------|
 | Onramp mint | Stripe `payment_intent_id` | `onramps.payment_intent_id` (unique) |
 | Offramp request | Generated `request_id` → hashed as `memo` | `offramps.memo` (unique) |
-| Webhook processing | Stripe event ID | Check before processing |
-
-**How It Works**:
-```
-Webhook arrives → Check if payment_intent_id exists in DB
-  ├── Yes → Already processed, return 200 (safe to retry)
-  └── No  → Process payment, insert record, mint tokens
-```
 
 This ensures Stripe can safely retry webhooks (up to 3 days) without causing duplicate mints.
 
-### State Machine Tracking
+### State Tracking
 
 **Question**: How do we track progress and recover from partial failures?
 
+| Option | Pros | Cons |
+|--------|------|------|
+| **Explicit state machines** ✓ | Clear transitions, easy to query failed states, debuggable | Must define all states upfront |
+| Event sourcing | Full history, replayable | Complex to implement, overkill for this scope |
+| Boolean flags (is_paid, is_minted) | Simple | Doesn't capture transitions, hard to debug |
+
 **Decision**: Use explicit state machines with database persistence for all flows.
 
-**Onramp States** (see [Database Schema](#database-schema)):
-```
-pending → paid → minting → minted
-                    ↓
-                  failed
-```
+**Onramp States**: `pending → paid → minting → minted` (or `→ failed`)
 
-**Offramp States**:
-```
-pending → transferred → burning → burned → paying → paid_out
-              ↓            ↓                  ↓
-           failed       failed             failed
-```
+**Offramp States**: `pending → transferred → burning → burned → paying → paid_out` (or `→ failed` at any step)
 
-**Benefits**:
-- Each state transition is atomic and logged
-- Failed operations can be identified and retried from the last successful state
-- Full audit trail for debugging and support
-
-### Ordered Operations
+### Operation Ordering
 
 **Question**: How do we ensure operations happen in the correct sequence?
 
-**Decision**: Enforce strict ordering with on-chain confirmation before proceeding.
+| Option | Pros | Cons |
+|--------|------|------|
+| **Strict ordering with confirmation** ✓ | Guarantees 1:1 backing, no speculative mints | Slower (wait for confirmations) |
+| Optimistic execution | Faster UX | Risk of double-mint or payout without burn |
+| Two-phase commit | Strong consistency | Complex, overkill for single-service |
 
-| Flow | Order Guarantee |
-|------|-----------------|
-| Onramp | Payment confirmed (webhook) → THEN mint tokens |
-| Offramp | Transfer confirmed (on-chain) → THEN burn → THEN payout |
+**Decision**: Enforce strict ordering—never mint before payment confirmed, never payout before burn confirmed.
 
 **Key Principle**: Never mint speculatively. Never payout before burn confirmation.
-
-```
-Onramp:  [Stripe Payment] ──webhook──▶ [Verify] ──▶ [Mint] ──▶ [Confirm on-chain]
-                                          ↑
-                                   Only proceed if
-                                   payment_intent.succeeded
-
-Offramp: [User Transfer] ──event──▶ [Verify memo] ──▶ [Burn] ──▶ [Confirm burn] ──▶ [Payout]
-                                         ↑                            ↑
-                                  Match to request             Wait for tx receipt
-```
 
 ### Error Recovery
 
 **Question**: How do we handle failures at each stage?
 
-**Decision**: Define clear recovery paths for all failure modes (see [Error Handling & Recovery](#error-handling--recovery) for full details).
+| Option | Pros | Cons |
+|--------|------|------|
+| **Manual recovery with state visibility** ✓ | Simple, appropriate for demo scale | Requires operator intervention |
+| Automatic retry with backoff | Self-healing | Complex retry logic, risk of infinite loops |
+| Dead letter queue | Captures all failures | Additional infrastructure |
 
-| Failure Point | State | Recovery Strategy |
-|---------------|-------|-------------------|
-| Stripe payment fails | `pending` → `failed` | User retries payment |
-| Mint tx fails | `paid` → `failed` | Manual retry or refund |
-| User never transfers | `pending` (stale) | Auto-expire after 24h |
-| Burn tx fails | `transferred` → `failed` | Manual burn + retry |
-| Payout fails | `burned` → `failed` | Manual Stripe payout (burn is proof) |
+**Decision**: Define clear recovery paths with manual intervention for failures (see [Error Handling & Recovery](#error-handling--recovery)).
 
-**Partial Failure Handling**:
-- If burn succeeds but payout fails → We have on-chain proof of burn, can retry payout manually
-- If transfer detected but memo invalid → Ignore, user contacts support
-- If webhook arrives before DB record → Return 500, Stripe retries later
-
-### Monitoring & Alerting (Production only, out of scope for demo)
-
-**Question**: How do we detect issues before they become critical?
-
-**Decision**: Monitor key metrics and alert on anomalies (see [Monitoring](#monitoring) for full details).
-
-| What We Monitor | Why | Alert Threshold |
-|-----------------|-----|-----------------|
-| Failed status count | Requires intervention | Any `failed` status |
-| Stale pending requests | Stuck in pipeline | Onramp > 10 min, Offramp > 1 hr |
-| Backend wallet balance | System operability | AlphaUSD < 100 |
-| Error rate | System health | > 5% in 1hr window |
-
+| Failure Point | Recovery Strategy |
+|---------------|-------------------|
+| Stripe payment fails | User retries payment |
+| Mint tx fails | Manual retry or refund |
+| User never transfers | Auto-expire after 24h |
+| Burn tx fails | Manual burn + retry |
+| Payout fails | Manual Stripe payout (burn tx is proof) |
 
 ---
 

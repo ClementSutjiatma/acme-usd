@@ -783,7 +783,7 @@ export function Dashboard() {
                     </svg>
                   </div>
                   <p className="text-black font-medium mb-1">Sign with Passkey</p>
-                  <p className="text-sm text-dark-500">Use your fingerprint or face</p>
+                  <p className="text-sm text-dark-500">Use your TouchID to sign the transaction</p>
                 </div>
               )}
 

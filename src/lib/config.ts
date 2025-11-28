@@ -1,40 +1,22 @@
 // Environment configuration with type safety
 
-// Base64 encode that works in both Node.js and Edge runtime
-function base64Encode(str: string): string {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(str).toString("base64");
-  }
-  // Edge runtime fallback
-  return btoa(str);
-}
-
 // Parse RPC URL - handle both formats (with and without credentials)
 function parseRpcUrl(url: string): { baseUrl: string; auth?: string } {
   try {
     const parsed = new URL(url);
     if (parsed.username && parsed.password) {
-      const credentials = `${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`;
-      const auth = base64Encode(credentials);
+      const auth = Buffer.from(`${parsed.username}:${parsed.password}`).toString("base64");
       const baseUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
       return { baseUrl, auth };
     }
     return { baseUrl: url };
-  } catch (e) {
-    console.error("[CONFIG] Failed to parse RPC URL:", e);
+  } catch {
     return { baseUrl: url };
   }
 }
 
 const rawRpcUrl = process.env.TEMPO_RPC_URL || "https://rpc.testnet.tempo.xyz";
 const { baseUrl: tempoRpcBaseUrl, auth: tempoRpcAuth } = parseRpcUrl(rawRpcUrl);
-
-// Debug logging for server-side (only log once at startup, not in client)
-if (typeof window === "undefined" && process.env.NODE_ENV !== "test") {
-  console.log("[CONFIG] TEMPO_RPC_URL set:", !!process.env.TEMPO_RPC_URL);
-  console.log("[CONFIG] tempoRpcBaseUrl:", tempoRpcBaseUrl);
-  console.log("[CONFIG] tempoRpcAuth set:", !!tempoRpcAuth);
-}
 
 export const config = {
   // Tempo Testnet - use base URL without credentials
