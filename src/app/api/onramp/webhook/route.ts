@@ -59,12 +59,13 @@ export async function POST(request: NextRequest) {
         console.log(`[WEBHOOK] Status updated to 'minting':`, mintingUpdate?.status);
 
         try {
-          // Mint AcmeUSD to user
+          // Mint AcmeUSD to user with payment intent ID as memo for on-chain auditability
           // We don't await here to avoid Stripe webhook timeout
           // mintAcmeUsd now includes timeout recovery - if RPC times out but balance increases, it succeeds
           mintAcmeUsd(
             userAddress as `0x${string}`,
-            amountUsd
+            amountUsd,
+            paymentIntent.id // Store payment_intent_id on-chain for auditability
           ).then(async (mintTxHash) => {
             // Update status to minted
             // Note: mintTxHash may be a placeholder (0x000...0) if mint was verified via balance check after timeout

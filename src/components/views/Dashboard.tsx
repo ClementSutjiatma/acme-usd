@@ -10,7 +10,7 @@ import { Hooks } from "tempo.ts/wagmi";
 import { useAcmeBalance } from "@/hooks/useAcmeBalance";
 import { useOnrampStatus } from "@/hooks/useOnrampStatus";
 import { useOfframpStatus } from "@/hooks/useOfframpStatus";
-import { useTransactions } from "@/hooks/useTransactions";
+import { useTransactions, type Transaction } from "@/hooks/useTransactions";
 import { useBankAccount, useCreateBankSession, useSaveBankAccount } from "@/hooks/useBankAccount";
 import { PaymentForm } from "@/components/PaymentForm";
 import { OnrampProgress, OfframpProgress } from "@/components/TransactionProgress";
@@ -20,6 +20,248 @@ import { publicConfig } from "@/lib/config";
 const stripePromise = publicConfig.stripePublicKey
   ? loadStripe(publicConfig.stripePublicKey)
   : null;
+
+// Helper to truncate hashes for display
+function truncateHash(hash: string, chars = 8): string {
+  if (hash.length <= chars * 2 + 2) return hash;
+  return `${hash.slice(0, chars + 2)}...${hash.slice(-chars)}`;
+}
+
+// Helper to copy to clipboard
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Transaction Row Component with expandable audit details
+function TransactionRow({ 
+  tx, 
+  isExpanded, 
+  onToggle 
+}: { 
+  tx: Transaction; 
+  isExpanded: boolean; 
+  onToggle: () => void;
+}) {
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const handleCopy = async (text: string, field: string) => {
+    const success = await copyToClipboard(text);
+    if (success) {
+      setCopied(field);
+      setTimeout(() => setCopied(null), 2000);
+    }
+  };
+
+  const hasAuditData = tx.status === "completed" && (tx.memoHash || tx.paymentReference);
+
+  return (
+    <motion.div
+      layout
+      className={`rounded-xl border transition-colors ${
+        isExpanded ? "bg-white border-dark-300 shadow-sm" : "border-transparent hover:bg-white/50"
+      }`}
+    >
+      {/* Collapsed Row */}
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between py-3 px-3 text-left"
+      >
+        <div className="flex items-center gap-3">
+          <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+            tx.type === "buy" ? "bg-gold-100" : "bg-dark-200"
+          }`}>
+            {tx.type === "buy" ? (
+              <svg className="w-4 h-4 text-gold-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4 text-dark-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+              </svg>
+            )}
+          </div>
+          <div>
+            <p className="text-sm font-medium text-black capitalize">{tx.type}</p>
+            <p className="text-xs text-dark-500">
+              {new Date(tx.timestamp).toLocaleDateString()}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-right">
+            <p className={`text-sm font-medium ${tx.type === "buy" ? "text-gold-600" : "text-black"}`}>
+              {tx.type === "buy" ? "+" : "-"}${tx.amount.toFixed(2)}
+            </p>
+            <p className="text-xs text-dark-500 capitalize">{tx.status}</p>
+          </div>
+          <motion.svg
+            animate={{ rotate: isExpanded ? 180 : 0 }}
+            className="w-4 h-4 text-dark-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </motion.svg>
+        </div>
+      </button>
+
+      {/* Expanded Audit Details */}
+      <AnimatePresence>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="px-3 pb-4">
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-blue-700 font-medium text-sm">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                    </svg>
+                    On-Chain Audit Proof
+                  </div>
+                  <span className="text-[10px] text-dark-400 bg-dark-100 px-2 py-0.5 rounded-full">
+                    Acme internal records
+                  </span>
+                </div>
+                
+                {/* Payment/Payout Reference */}
+                {tx.paymentReference && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-dark-500">
+                      {tx.type === "buy" ? "Acme Payment ID" : "Acme Payout ID"}
+                      <span className="text-dark-400 ml-1">(Stripe)</span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <code className="text-xs bg-white px-2 py-1 rounded border border-blue-200 text-dark-700 font-mono">
+                        {truncateHash(tx.paymentReference, 10)}
+                      </code>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCopy(tx.paymentReference!, "ref");
+                        }}
+                        className="text-blue-500 hover:text-blue-700 text-xs"
+                      >
+                        {copied === "ref" ? "Copied!" : "Copy"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Memo Hash (on-chain) */}
+                {tx.memoHash && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-dark-500">
+                      On-Chain Memo
+                      <span className="text-dark-400 ml-1">(blockchain proof)</span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <code className="text-xs bg-white px-2 py-1 rounded border border-blue-200 text-dark-700 font-mono">
+                        {truncateHash(tx.memoHash, 10)}
+                      </code>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCopy(tx.memoHash!, "memo");
+                        }}
+                        className="text-blue-500 hover:text-blue-700 text-xs"
+                      >
+                        {copied === "memo" ? "Copied!" : "Copy"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Verification Explanation */}
+                {tx.paymentReference && tx.memoHash && (
+                  <div className="pt-2 border-t border-blue-200">
+                    <p className="text-xs text-dark-600">
+                      <span className="text-green-600 font-medium">Cryptographic link:</span>{" "}
+                      <code className="bg-white px-1 rounded text-[10px]">hash({tx.type === "buy" ? "payment_id" : "payout_id"})</code>
+                      {" "}={" "}
+                      <code className="bg-white px-1 rounded text-[10px]">on-chain memo</code>
+                    </p>
+                    <p className="text-[10px] text-dark-400 mt-1">
+                      This proves the {tx.type === "buy" ? "mint" : "burn"} is tied to Acme&apos;s {tx.type === "buy" ? "payment" : "payout"} record.
+                    </p>
+                  </div>
+                )}
+
+                {/* Transaction Links */}
+                <div className="pt-2 border-t border-blue-200 space-y-2">
+                  {tx.type === "buy" && tx.mintTxHash && (
+                    <a
+                      href={`${publicConfig.explorerUrl}/tx/${tx.mintTxHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                    >
+                      View Mint Transaction
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                    </a>
+                  )}
+                  {tx.type === "withdraw" && (
+                    <>
+                      {tx.transferTxHash && (
+                        <a
+                          href={`${publicConfig.explorerUrl}/tx/${tx.transferTxHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                        >
+                          View Transfer Transaction
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                        </a>
+                      )}
+                      {tx.burnTxHash && (
+                        <a
+                          href={`${publicConfig.explorerUrl}/tx/${tx.burnTxHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                        >
+                          View Burn Transaction
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                        </a>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* No audit data message */}
+                {!hasAuditData && tx.status === "completed" && (
+                  <p className="text-xs text-dark-500 italic">
+                    Audit data not available for this transaction.
+                  </p>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
 
 type ActiveFlow = null | "buy" | "withdraw";
 type BuyStep = "payment" | "processing" | "success";
@@ -44,6 +286,7 @@ export function Dashboard() {
   const [activeFlow, setActiveFlow] = useState<ActiveFlow>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedTab, setSelectedTab] = useState<"buy" | "withdraw">("buy");
+  const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
   
   // Buy flow state
   const [buyStep, setBuyStep] = useState<BuyStep>("payment");
@@ -437,7 +680,7 @@ export function Dashboard() {
             ) : (
               <>
                 {parseFloat(balanceData?.balance || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                <span className="text-lg text-dark-400 font-medium ml-2">AUSD</span>
+                <span className="text-lg text-dark-400 font-medium ml-2">AcmeUSD</span>
               </>
             )}
           </p>
@@ -492,6 +735,9 @@ export function Dashboard() {
           {/* Input */}
           <div className="mb-6">
             <div className="relative">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-lg font-semibold text-dark-400">
+                {selectedTab === "buy" ? "USD" : "AcmeUSD"}
+              </span>
               <input
                 type="number"
                 value={amount}
@@ -500,11 +746,8 @@ export function Dashboard() {
                 min="0.01"
                 step="0.01"
                 disabled={activeFlow !== null}
-                className="w-full py-4 text-3xl font-semibold bg-dark-50 rounded-2xl border border-dark-200 text-black placeholder:text-dark-400 focus:outline-none focus:border-gold-500 disabled:opacity-50 pl-4 pr-20 text-right"
+                className="w-full py-4 text-3xl font-semibold bg-dark-50 rounded-2xl border border-dark-200 text-black placeholder:text-dark-400 focus:outline-none focus:border-gold-500 disabled:opacity-50 pl-24 pr-4 text-right"
               />
-              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-lg font-semibold text-dark-400">
-                {selectedTab === "buy" ? "USD" : "AUSD"}
-              </span>
             </div>
           </div>
 
@@ -558,7 +801,7 @@ export function Dashboard() {
                 disabled={!amount || amountNum <= 0}
                 className="w-full py-4 rounded-2xl bg-gradient-to-r from-gold-500 to-gold-600 text-black font-semibold shadow-lg shadow-gold-500/25 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Buy AUSD
+                Buy AcmeUSD
               </motion.button>
             ) : (
               <motion.button
@@ -587,7 +830,7 @@ export function Dashboard() {
             >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold text-black">
-                  Buy ${amountNum.toFixed(2)} AUSD
+                  Buy ${amountNum.toFixed(2)} AcmeUSD
                 </h3>
                 {buyStep !== "success" && (
                   <button
@@ -647,7 +890,7 @@ export function Dashboard() {
                   </div>
                   <p className="text-black font-medium mb-1">Purchase Complete!</p>
                   <p className="text-sm text-dark-500 mb-4">
-                    ${amountNum.toFixed(2)} AUSD added to your wallet
+                    ${amountNum.toFixed(2)} AcmeUSD added to your wallet
                   </p>
                   {buyStatus?.mintTxHash && (
                     <a
@@ -681,7 +924,7 @@ export function Dashboard() {
             >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold text-black">
-                  Withdraw ${amountNum.toFixed(2)} AUSD
+                  Withdraw ${amountNum.toFixed(2)} AcmeUSD
                 </h3>
                 {withdrawStep !== "success" && (
                   <button
@@ -698,7 +941,7 @@ export function Dashboard() {
                   <div className="space-y-3 mb-6 text-sm">
                     <div className="flex justify-between py-2 border-b border-dark-100">
                       <span className="text-dark-500">Amount</span>
-                      <span className="text-black font-medium">${amountNum.toFixed(2)} AUSD</span>
+                      <span className="text-black font-medium">${amountNum.toFixed(2)} AcmeUSD</span>
                     </div>
                     <div className="flex justify-between py-2 border-b border-dark-100">
                       <span className="text-dark-500">Network Fee</span>
@@ -855,38 +1098,12 @@ export function Dashboard() {
           ) : (
             <div className="space-y-3">
               {transactions.map((tx) => (
-                <div
+                <TransactionRow
                   key={tx.id}
-                  className="flex items-center justify-between py-3 border-b border-dark-200 last:border-0"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                      tx.type === "buy" ? "bg-gold-100" : "bg-dark-200"
-                    }`}>
-                      {tx.type === "buy" ? (
-                        <svg className="w-4 h-4 text-gold-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                        </svg>
-                      ) : (
-                        <svg className="w-4 h-4 text-dark-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
-                        </svg>
-                      )}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-black capitalize">{tx.type}</p>
-                      <p className="text-xs text-dark-500">
-                        {new Date(tx.timestamp).toLocaleDateString()}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className={`text-sm font-medium ${tx.type === "buy" ? "text-gold-600" : "text-black"}`}>
-                      {tx.type === "buy" ? "+" : "-"}${tx.amount.toFixed(2)}
-                    </p>
-                    <p className="text-xs text-dark-500 capitalize">{tx.status}</p>
-                  </div>
-                </div>
+                  tx={tx}
+                  isExpanded={expandedTxId === tx.id}
+                  onToggle={() => setExpandedTxId(expandedTxId === tx.id ? null : tx.id)}
+                />
               ))}
             </div>
           )}

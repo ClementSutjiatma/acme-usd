@@ -2,13 +2,20 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-interface Transaction {
+export interface Transaction {
   id: string;
   type: "buy" | "withdraw";
   amount: number;
   status: "completed" | "pending" | "failed";
   txHash?: string;
   timestamp: string;
+  // Audit fields for on-chain verification
+  mintTxHash?: string;        // For buy: the mint transaction
+  burnTxHash?: string;        // For withdraw: the burn transaction
+  transferTxHash?: string;    // For withdraw: user's transfer to treasury
+  paymentReference?: string;  // payment_intent_id (buy) or payout_id (withdraw)
+  memoHash?: string;          // The on-chain memo (keccak256 of paymentReference)
+  transferMemo?: string;      // For withdraw: the memo from user's transfer
 }
 
 interface TransactionsResponse {

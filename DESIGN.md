@@ -39,6 +39,315 @@ This document outlines the design and implementation plan for building an onramp
 ---
 ## UX 
 
+### Wallet Setup
+
+**Question**: How do users get started, authenticate and sign transactions?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Tempo Passkey Wallet** ✓ | No extensions, no seed phrases, biometric auth (Face ID/Touch ID), works on any device | Tempo-specific, less portable across chains |
+| MetaMask / Browser Extension | Universal, widely adopted, multi-chain | Requires install, seed phrase management, intimidating for non-crypto users |
+| WalletConnect | Mobile-first, supports many wallets | Extra step (QR scan), assumes user has a wallet app |
+| Custodial (email/password) | Familiar logn | Additional overhead over passkey only method|
+
+**Decision**: Use `tempo.ts/wagmi` with `webAuthn()` connector for passkey wallets.
+
+**Rationale**:
+- Assignment specifies: "All users will be using Tempo passkey wallets"
+- Tempo's SDK provides native WebAuthn support
+- P256 keypair created via device biometrics (Face ID, Touch ID, etc.)
+- Address derived from public key hash
+- **Accessibility for non-crypto users**: No wallet setup, no seed phrases, no browser extensions—just biometrics they already use
+
+**Benefits**:
+- No seed phrases to manage or lose
+- No browser extensions required
+- No hardware wallets needed
+- Familiar authentication UX (biometrics)
+- Zero onboarding friction for mainstream users
+
+### Onramp Payment Strategy 
+
+**Question**: How can users easily purchase AcmeUSD with fiat? 
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Stripe Elements + Link** ✓ | Embedded in-app, one-click for returning users, no redirect, card + Apple/Google Pay | More integration work than Checkout |
+| Stripe Checkout | Simple integration, hosted by Stripe, PCI compliant out of box | Redirects user away from app, less seamless UX |
+| Plaid + ACH | Lower fees, direct bank transfers | Slower (1-3 days), redirect required, more complex setup |
+| Crypto onramps (MoonPay, Transak) | Crypto-native users familiar with flow | High fees, KYC friction, overkill for fiat stablecoin |
+
+**Decision**: Stripe **Payment Element** (embedded) with **Link** enabled.
+
+**Why Embedded (No Redirect)?**
+- User stays on our single-page app
+- Works seamlessly with Framer Motion transitions
+- Link provides one-click checkout for returning users
+- Better UX than redirecting to stripe.com
+
+**How Link Works**:
+1. User enters email → Link checks if they have saved payment info
+2. If yes → One-click authentication (no card entry needed)
+3. If no → Standard card form, option to save to Link
+
+### Offramp Payout Strategy
+
+**Question**: How do users easily get paid out during withdrawal? 
+
+| Option | Pros | Cons |
+|--------|------|------|
+| Reuse onramp payment method | Zero friction | Credit cards can't receive payouts |
+| **Stripe Financial Connections** ✓ | Reliable bank payouts, secure | Extra linking step |
+| Stripe Connect | Full control | Complex onboarding, overkill for demo |
+
+**Decision**: Use Stripe Financial Connections to link bank accounts for payouts.
+
+**Rationale**:
+- Credit cards (most common onramp method) cannot receive payouts
+- Debit card payouts require special Stripe approval (Instant Payouts)
+- Bank accounts via ACH are universally supported
+- Financial Connections provides secure, Plaid-powered bank linking
+- One-time setup, then frictionless for future withdrawals
+
+**How It Works**:
+```
+First withdrawal (no bank linked):
+
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   User      │    │   Financial │    │   Bank      │
+│   clicks    │───▶│   Connections───▶│   account   │
+│   Withdraw  │    │   modal     │    │   linked    │
+└─────────────┘    └─────────────┘    └─────────────┘
+       │
+       ▼
+┌─────────────┐
+│   users     │
+│   table     │
+│   updated   │
+└─────────────┘
+
+Subsequent withdrawals:
+
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Offramp   │    │   Look up   │    │   ACH       │
+│   Request   │───▶│   linked    │───▶│   payout    │
+│             │    │   bank      │    │   initiated │
+└─────────────┘    └─────────────┘    └─────────────┘
+```
+
+### Gas Sponsorship
+
+**Question**: How do new users pay for gas when they have zero tokens?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **ACME sponsors all gas** ✓ | Zero friction onboarding | ACME bears cost |
+| Users acquire gas first | No cost to ACME | Terrible UX, blocks adoption, increases support burden|
+| Sponsor first tx only | Balanced | Added complexity |
+
+**Decision**: ACME sponsors all user gas fees using Tempo's Native AA `fee_payer_signature`.
+
+**Rationale**:
+- Users start with zero tokens after creating a passkey wallet
+- Without sponsorship, users cannot transact until they acquire a fee token
+- Tempo's Native AA transaction type supports gas sponsorship natively
+- Cost is minimal (<$0.001 per transaction)
+
+**Cost Considerations**:
+- Acceptable as user acquisition cost
+- Can add per-user rate limiting if needed, to prevent overuse of onramp/ offramp
+
+### Token Architecture
+
+**Question**: How should AcmeUSD be implemented?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **TIP-20 via Factory** ✓ | Native fee payment, memo support, exchange integration | Tied to Tempo's standard |
+| Custom ERC-20 | Full control | Won't work as fee token, no exchange pairing |
+
+**Decision**: Deploy AcmeUSD as a TIP-20 token via `TIP20Factory` at `0x20Fc000000000000000000000000000000000000`.
+
+**Rationale**: 
+- TIP-20 is required to satisfy requirement #4 ("user can use AcmeUSD to pay fees on Tempo")
+- Per Tempo spec: "users can pay gas fees in any TIP-20 token whose currency is USD"
+- Provides built-in memo support for offramp tracking
+- Enables trading on Tempo's enshrined Stablecoin Exchange
+
+**Configuration**:
+```
+Name:       "AcmeUSD"
+Symbol:     "AUSD"
+Currency:   "USD"
+QuoteToken: linkingUSD (required for USD-denominated tokens)
+Decimals:   6 (TIP-20 default)
+```
+
+---
+## Security
+
+### Ensuring 1:1 Backing
+
+**Question**: How do we guarantee AcmeUSD supply always equals fiat deposits?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Strict ordering with confirmation** ✓ | Guarantees 1:1 backing, no speculative mints, recoverable from failures | Slower (wait for confirmations) |
+| Optimistic execution | Faster UX | Risk of double-mint or payout without burn |
+| Smart contract escrow | Trustless, automated | Can't hold fiat, overkill for centralized issuer |
+
+**Decision**: Enforce strict ordering—never mint before payment confirmed, never payout before burn confirmed.
+
+**Rationale**:
+- Fiat operations (Stripe payments/payouts) are external and async—we must wait for confirmation
+- Minting before payment confirmation risks unbacked tokens if payment fails
+- Paying out before burn confirmation risks double-spending
+- State machines track progress and enable recovery from partial failures
+
+**Implementation**:
+
+**Onramp Flow** (only mint AFTER payment confirmed):
+```
+User Pays → Stripe Processes → Webhook Confirms → Mint Tokens
+```
+
+**Offramp Flow** (only payout AFTER transfer confirmed):
+```
+User Transfers → Backend Confirms → Initiate Payout → Burn Tokens
+```
+
+**Key Principle**: Never mint speculatively. Never payout before transfer is confirmed on-chain.
+
+---
+
+### On-Chain Auditability
+
+**Question**: How do we create a verifiable link between on-chain operations and off-chain payment data?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **On-chain memos (TIP-20)** ✓ | Permanent on-chain proof, publicly verifiable, links mint/burn to payment IDs | 32-byte limit |
+| Database-only tracking | Simple, flexible | Not publicly verifiable, requires trust in database |
+| Event logs without memo | Standard ERC-20 compatible | No semantic link to off-chain data |
+| Off-chain attestations | Rich data | Requires separate verification system |
+
+**Decision**: Use TIP-20's memo functions (`mintWithMemo`, `burnWithMemo`, `transferWithMemo`) to store hashed payment references on-chain.
+
+**Rationale**:
+- On-chain memos create a permanent, publicly verifiable audit trail
+- Anyone can prove: this mint corresponds to Stripe payment `pi_xxx`, this burn corresponds to payout `po_xxx`
+- TIP-20 provides native 32-byte memo support—keccak256 hashes fit perfectly
+- Enables third-party audits without database access
+
+**Implementation**:
+
+| Operation | Off-Chain Reference | On-Chain Memo |
+|-----------|---------------------|---------------|
+| Onramp mint | Stripe `payment_intent_id` | `keccak256(payment_intent_id)` |
+| Offramp transfer | Generated `request_id` | `keccak256(request_id)` |
+| Offramp burn | Stripe `payout_id` | `keccak256(payout_id)` |
+
+**Onramp**: When Stripe webhook confirms payment, mint with memo:
+```
+mintWithMemo(userAddress, amount, keccak256(payment_intent_id))
+```
+
+**Offramp**: User transfers with request memo, backend burns with payout memo:
+```
+1. User calls: transferWithMemo(treasury, amount, keccak256(request_id))
+2. Backend matches memo to offramp request
+3. Backend initiates Stripe payout → gets payout_id
+4. Backend calls: burnWithMemo(amount, keccak256(payout_id))
+```
+
+**Audit Trail**: For any mint or burn transaction, anyone can:
+1. Extract the memo from on-chain event logs
+2. Verify it matches the hash of the corresponding Stripe payment/payout ID
+3. Confirm 1:1 correspondence between token supply changes and fiat movements
+
+### Mint/Burn Authority Model
+
+**Question**: Who controls token supply?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Single backend wallet with ISSUER_ROLE** ✓ | Simple, fast minting | Single point of failure |
+| Multi-sig | More secure | Adds latency, complexity |
+| Smart contract escrow | Trustless | Complex, overkill for centralized issuer |
+
+**Decision**: ACME backend holds a single wallet with `ISSUER_ROLE`.
+
+**Rationale**:
+- For a centralized fiat-backed stablecoin, users trust ACME regardless of on-chain architecture
+- Similar to how Circle operates USDC - centralized issuer with on-chain tokens
+- Simplest implementation for demo scope
+- Multi-sig or HSM would be recommended for production
+
+**Security Measures**:
+- Private key stored as environment variable (not in code)
+- In production: Use Hardware Security Module (HSM) or multi-sig
+
+---
+---
+
+## Reliability
+
+**Question**: How do we ensure operations complete reliably across payments, blockchain, and payouts?
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Event-driven + Idempotency + State Machines** ✓ | Handles retries safely, recoverable from any failure point, full audit trail | More complex than fire-and-forget |
+| Synchronous request/response | Simple to implement, immediate feedback | No retry safety, partial failures unrecoverable |
+| Message queue (Kafka, SQS) | High throughput, guaranteed delivery | Infrastructure overhead, overkill for demo scope |
+| No reliability measures | Fastest to build | Double-mints, lost payouts, no debugging capability |
+
+**Decision**: Event-driven architecture with idempotency keys, explicit state machines, and ordered operations.
+
+**Rationale**:
+- Webhooks and blockchain events are inherently async—we must handle retries safely
+- Partial failures (e.g., burn succeeds, payout fails) need clear recovery paths
+- State machines provide audit trail and enable retry from last known good state
+- Avoids message queue complexity while maintaining reliability guarantees
+
+### Idempotency
+
+**Question**: How do we prevent duplicate operations (e.g., double-minting) on retries?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Database unique constraints** ✓ | Simple, atomic, leverages existing DB | Requires careful key design |
+| Distributed locks (Redis) | Works across services | Additional infrastructure, lock expiry edge cases |
+| In-memory deduplication | Fast | Lost on restart, doesn't scale horizontally |
+
+**Decision**: Use unique idempotency keys stored in the database for all critical operations.
+
+| Operation | Idempotency Key | Storage |
+|-----------|-----------------|---------|
+| Onramp mint | Stripe `payment_intent_id` | `onramps.payment_intent_id` (unique) |
+| Offramp request | Generated `request_id` → hashed as `memo` | `offramps.memo` (unique) |
+
+This ensures Stripe can safely retry webhooks (up to 3 days) without causing duplicate mints.
+
+### State Tracking
+
+**Question**: How do we track progress and recover from partial failures?
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Explicit state machines** ✓ | Clear transitions, easy to query failed states, debuggable | Must define all states upfront |
+| Event sourcing | Full history, replayable | Complex to implement, overkill for this scope |
+| Boolean flags (is_paid, is_minted) | Simple | Doesn't capture transitions, hard to debug |
+
+**Decision**: Use explicit state machines with database persistence for all flows.
+
+**Onramp States**: `pending → paid → minting → minted` (or `→ failed`)
+
+**Offramp States**: `pending → transferred → paying → burned → paid_out` (or `→ failed` at any step)
+
+---
+
+## User Flow
+Based on the design decisions made above, the ideal user flow looks like the following
 ### Onramp User Journey: USD → AcmeUSD
 
 ```
@@ -139,335 +448,6 @@ This document outlines the design and implementation plan for building an onramp
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Wallet Integration
-
-**Question**: How do users authenticate and sign transactions?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **Tempo Passkey Wallet** ✓ | No extensions, no seed phrases, biometric auth (Face ID/Touch ID), works on any device | Tempo-specific, less portable across chains |
-| MetaMask / Browser Extension | Universal, widely adopted, multi-chain | Requires install, seed phrase management, intimidating for non-crypto users |
-| WalletConnect | Mobile-first, supports many wallets | Extra step (QR scan), assumes user has a wallet app |
-| Custodial (email/password) | Familiar logn | Additional overhead over passkey only method|
-
-**Decision**: Use `tempo.ts/wagmi` with `webAuthn()` connector for passkey wallets.
-
-**Rationale**:
-- Assignment specifies: "All users will be using Tempo passkey wallets"
-- Tempo's SDK provides native WebAuthn support
-- P256 keypair created via device biometrics (Face ID, Touch ID, etc.)
-- Address derived from public key hash
-- **Accessibility for non-crypto users**: No wallet setup, no seed phrases, no browser extensions—just biometrics they already use
-
-**Benefits**:
-- No seed phrases to manage or lose
-- No browser extensions required
-- No hardware wallets needed
-- Familiar authentication UX (biometrics)
-- Zero onboarding friction for mainstream users
-
-### Onramp Payment Provider 
-
-**Question**: Which payment rails for USD?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **Stripe Elements + Link** ✓ | Embedded in-app, one-click for returning users, no redirect, card + Apple/Google Pay | More integration work than Checkout |
-| Stripe Checkout | Simple integration, hosted by Stripe, PCI compliant out of box | Redirects user away from app, less seamless UX |
-| Plaid + ACH | Lower fees, direct bank transfers | Slower (1-3 days), redirect required, more complex setup |
-| Crypto onramps (MoonPay, Transak) | Crypto-native users familiar with flow | High fees, KYC friction, overkill for fiat stablecoin |
-
-**Decision**: Stripe **Payment Element** (embedded) with **Link** enabled.
-
-**Why Embedded (No Redirect)?**
-- User stays on our single-page app
-- Works seamlessly with Framer Motion transitions
-- Link provides one-click checkout for returning users
-- Better UX than redirecting to stripe.com
-
-**How Link Works**:
-1. User enters email → Link checks if they have saved payment info
-2. If yes → One-click authentication (no card entry needed)
-3. If no → Standard card form, option to save to Link
-
-### Offramp Payout Strategy
-
-**Question**: How do users specify where to receive offramp payouts?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| Reuse onramp payment method | Zero friction | Credit cards can't receive payouts |
-| **Stripe Financial Connections** ✓ | Reliable bank payouts, secure | Extra linking step |
-| Stripe Connect | Full control | Complex onboarding, overkill for demo |
-
-**Decision**: Use Stripe Financial Connections to link bank accounts for payouts.
-
-**Rationale**:
-- Credit cards (most common onramp method) cannot receive payouts
-- Debit card payouts require special Stripe approval (Instant Payouts)
-- Bank accounts via ACH are universally supported
-- Financial Connections provides secure, Plaid-powered bank linking
-- One-time setup, then frictionless for future withdrawals
-
-**How It Works**:
-```
-First withdrawal (no bank linked):
-
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   User      │    │   Financial │    │   Bank      │
-│   clicks    │───▶│   Connections───▶│   account   │
-│   Withdraw  │    │   modal     │    │   linked    │
-└─────────────┘    └─────────────┘    └─────────────┘
-       │
-       ▼
-┌─────────────┐
-│   users     │
-│   table     │
-│   updated   │
-└─────────────┘
-
-Subsequent withdrawals:
-
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Offramp   │    │   Look up   │    │   ACH       │
-│   Request   │───▶│   linked    │───▶│   payout    │
-│             │    │   bank      │    │   initiated │
-└─────────────┘    └─────────────┘    └─────────────┘
-```
-
-### Gas Sponsorship
-
-**Question**: How do new users pay for gas when they have zero tokens?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **ACME sponsors all gas** ✓ | Zero friction onboarding | ACME bears cost |
-| Users acquire gas first | No cost to ACME | Terrible UX, blocks adoption |
-| Sponsor first tx only | Balanced | Added complexity |
-
-**Decision**: ACME sponsors all user gas fees using Tempo's Native AA `fee_payer_signature`.
-
-**Rationale**:
-- Users start with zero tokens after creating a passkey wallet
-- Without sponsorship, users cannot transact until they acquire a fee token
-- Tempo's Native AA transaction type supports gas sponsorship natively
-- Cost is minimal (~$0.001 per transaction)
-
-**Cost Considerations**:
-- Acceptable as user acquisition cost
-- Can add per-user rate limiting if needed, to prevent overuse of onramp/ offramp
----
-## Security
-
-### Token Architecture
-
-**Question**: How should AcmeUSD be implemented?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **TIP-20 via Factory** ✓ | Native fee payment, memo support, exchange integration | Tied to Tempo's standard |
-| Custom ERC-20 | Full control | Won't work as fee token, no exchange pairing |
-
-**Decision**: Deploy AcmeUSD as a TIP-20 token via `TIP20Factory` at `0x20Fc000000000000000000000000000000000000`.
-
-**Rationale**: 
-- TIP-20 is required to satisfy requirement #4 ("user can use AcmeUSD to pay fees on Tempo")
-- Per Tempo spec: "users can pay gas fees in any TIP-20 token whose currency is USD"
-- Provides built-in memo support for offramp tracking
-- Enables trading on Tempo's enshrined Stablecoin Exchange
-
-**Configuration**:
-```
-Name:       "AcmeUSD"
-Symbol:     "AUSD"
-Currency:   "USD"
-QuoteToken: linkingUSD (required for USD-denominated tokens)
-Decimals:   6 (TIP-20 default)
-```
-
----
-
-### Mint/Burn Authority Model
-
-**Question**: Who controls token supply?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **Single backend wallet with ISSUER_ROLE** ✓ | Simple, fast minting | Single point of failure |
-| Multi-sig | More secure | Adds latency, complexity |
-| Smart contract escrow | Trustless | Complex, overkill for centralized issuer |
-
-**Decision**: ACME backend holds a single wallet with `ISSUER_ROLE`.
-
-**Rationale**:
-- For a centralized fiat-backed stablecoin, users trust ACME regardless of on-chain architecture
-- Similar to how Circle operates USDC - centralized issuer with on-chain tokens
-- Simplest implementation for demo scope
-- Multi-sig or HSM would be recommended for production
-
-**Security Measures**:
-- Private key stored as environment variable (not in code)
-- In production: Use Hardware Security Module (HSM) or multi-sig
-
----
-
-### Ensuring 1:1 Backing
-
-**Question**: How do we guarantee supply equals deposits?
-
-**Decision**: Event-driven mint/burn with strict ordering.
-
-**Onramp Flow** (Only mint AFTER payment confirmed):
-```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   User      │    │   Stripe    │    │   Webhook   │    │   Mint      │
-│   Pays      │───▶│   Processes │───▶│   Confirms  │───▶│   Tokens    │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-```
-
-**Offramp Flow** (Only payout AFTER tokens received):
-```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   User      │    │   Backend   │    │   Burn      │    │   Initiate  │
-│   Transfers │───▶│   Detects   │───▶│   Tokens    │───▶│   Payout    │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-```
-
-**Key Principle**: The order of operations is critical. Never mint speculatively.
-
-**Implementation Details**:
-- Stripe webhook must confirm `payment_intent.succeeded` before minting
-- Database tracks state machine: `pending → confirmed → minted`
-- Idempotency keys prevent double-minting on webhook replay
-- Offramp payout only initiated after burn transaction confirmed on-chain
-
----
-
-### Offramp Tracking Mechanism
-
-**Question**: How do you link an on-chain transfer to an off-chain payout?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **transferWithMemo** ✓ | Single tx, on-chain proof | 32-byte limit |
-| Approval + transferFrom | Standard pattern | 2 transactions |
-| User burns directly | Simplest | User can't have ISSUER_ROLE |
-
-**Decision**: Use TIP-20's `transferWithMemo` function with a unique request ID.
-
-**Rationale**:
-- TIP-20 provides built-in 32-byte memo support
-- Single transaction for better UX
-- On-chain proof links transfer to specific offramp request
-- No need to grant users any special roles
-
-**Implementation**:
-```
-1. User requests offramp → Backend generates unique requestId
-2. Backend creates memo: keccak256(requestId) → bytes32
-3. User calls: transferWithMemo(treasury, amount, memo)
-4. Backend monitors TransferWithMemo events
-5. Matches memo → Burns tokens → Looks up user's linked bank account
-6. Initiates ACH payout to linked bank account
-```
-
-**Payout Destination**:
-- Uses the bank account linked via Stripe Financial Connections
-- Bank accounts receive standard ACH transfers (1-3 business days)
-- User must link a bank account before first withdrawal
-
----
-
-## Reliability
-
-**Question**: How do we ensure operations complete reliably across payments, blockchain, and payouts?
-
-| Approach | Pros | Cons |
-|----------|------|------|
-| **Event-driven + Idempotency + State Machines** ✓ | Handles retries safely, recoverable from any failure point, full audit trail | More complex than fire-and-forget |
-| Synchronous request/response | Simple to implement, immediate feedback | No retry safety, partial failures unrecoverable |
-| Message queue (Kafka, SQS) | High throughput, guaranteed delivery | Infrastructure overhead, overkill for demo scope |
-| No reliability measures | Fastest to build | Double-mints, lost payouts, no debugging capability |
-
-**Decision**: Event-driven architecture with idempotency keys, explicit state machines, and ordered operations.
-
-**Rationale**:
-- Webhooks and blockchain events are inherently async—we must handle retries safely
-- Partial failures (e.g., burn succeeds, payout fails) need clear recovery paths
-- State machines provide audit trail and enable retry from last known good state
-- Avoids message queue complexity while maintaining reliability guarantees
-
-### Idempotency
-
-**Question**: How do we prevent duplicate operations (e.g., double-minting) on retries?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **Database unique constraints** ✓ | Simple, atomic, leverages existing DB | Requires careful key design |
-| Distributed locks (Redis) | Works across services | Additional infrastructure, lock expiry edge cases |
-| In-memory deduplication | Fast | Lost on restart, doesn't scale horizontally |
-
-**Decision**: Use unique idempotency keys stored in the database for all critical operations.
-
-| Operation | Idempotency Key | Storage |
-|-----------|-----------------|---------|
-| Onramp mint | Stripe `payment_intent_id` | `onramps.payment_intent_id` (unique) |
-| Offramp request | Generated `request_id` → hashed as `memo` | `offramps.memo` (unique) |
-
-This ensures Stripe can safely retry webhooks (up to 3 days) without causing duplicate mints.
-
-### State Tracking
-
-**Question**: How do we track progress and recover from partial failures?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **Explicit state machines** ✓ | Clear transitions, easy to query failed states, debuggable | Must define all states upfront |
-| Event sourcing | Full history, replayable | Complex to implement, overkill for this scope |
-| Boolean flags (is_paid, is_minted) | Simple | Doesn't capture transitions, hard to debug |
-
-**Decision**: Use explicit state machines with database persistence for all flows.
-
-**Onramp States**: `pending → paid → minting → minted` (or `→ failed`)
-
-**Offramp States**: `pending → transferred → burning → burned → paying → paid_out` (or `→ failed` at any step)
-
-### Operation Ordering
-
-**Question**: How do we ensure operations happen in the correct sequence?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **Strict ordering with confirmation** ✓ | Guarantees 1:1 backing, no speculative mints | Slower (wait for confirmations) |
-| Optimistic execution | Faster UX | Risk of double-mint or payout without burn |
-| Two-phase commit | Strong consistency | Complex, overkill for single-service |
-
-**Decision**: Enforce strict ordering—never mint before payment confirmed, never payout before burn confirmed.
-
-**Key Principle**: Never mint speculatively. Never payout before burn confirmation.
-
-### Error Recovery
-
-**Question**: How do we handle failures at each stage?
-
-| Option | Pros | Cons |
-|--------|------|------|
-| **Manual recovery with state visibility** ✓ | Simple, appropriate for demo scale | Requires operator intervention |
-| Automatic retry with backoff | Self-healing | Complex retry logic, risk of infinite loops |
-| Dead letter queue | Captures all failures | Additional infrastructure |
-
-**Decision**: Define clear recovery paths with manual intervention for failures (see [Error Handling & Recovery](#error-handling--recovery)).
-
-| Failure Point | Recovery Strategy |
-|---------------|-------------------|
-| Stripe payment fails | User retries payment |
-| Mint tx fails | Manual retry or refund |
-| User never transfers | Auto-expire after 24h |
-| Burn tx fails | Manual burn + retry |
-| Payout fails | Manual Stripe payout (burn tx is proof) |
-
----
 
 ## Architecture
 
@@ -759,7 +739,7 @@ pending → paid → minting → minted
 
 **Offramp States:**
 ```
-pending → transferred → burning → burned → paying → paid_out
+pending → transferred → paying → burned → paid_out
               ↓            ↓                  ↓
            failed       failed             failed
 ```

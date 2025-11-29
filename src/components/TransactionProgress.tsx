@@ -123,20 +123,20 @@ export function OnrampProgress({ status }: { status: string }) {
 }
 
 // Pre-configured for offramp (withdraw) flow
+// Order: transfer → payout initiated → burn (with payout ID on-chain) → complete
 export function OfframpProgress({ status }: { status: string }) {
   const steps = [
     { id: "transfer", label: "Transfer" },
-    { id: "burning", label: "Processing" },
     { id: "payout", label: "Bank Payout" },
+    { id: "finalize", label: "Finalizing" },
     { id: "complete", label: "Complete" },
   ];
 
+  // Status flow: pending → transferred → paying → paid_out
   const getCurrentStepIndex = () => {
-    if (status === "paid_out") return 3;
-    if (status === "paying") return 2;
-    if (status === "burned") return 2;
-    if (status === "burning") return 1;
-    if (status === "transferred") return 1;
+    if (status === "paid_out") return 3;  // Complete
+    if (status === "paying") return 2;     // Payout created, burning tokens
+    if (status === "transferred") return 1; // Transfer confirmed, creating payout
     return 0; // pending
   };
 

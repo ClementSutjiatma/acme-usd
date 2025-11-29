@@ -163,21 +163,14 @@ export async function POST(
     }
 
     // Process the offramp
+    // Order: transfer confirmed → create payout (get ID) → burn with payout ID
+    // This allows us to store the payout ID on-chain for full auditability
     try {
       // Update status to transferred
       console.log(`[PROCESS] Updating status to transferred...`);
       await updateOfframpStatus(supabase, offramp.id, {
         status: "transferred",
         transfer_tx_hash: txHash,
-      });
-
-      // Burn the tokens
-      console.log(`[PROCESS] Burning ${offramp.amount_usd / 100} AcmeUSD...`);
-      const burnTxHash = await burnAcmeUsd(offramp.amount_usd / 100);
-
-      await updateOfframpStatus(supabase, offramp.id, {
-        status: "burned",
-        burn_tx_hash: burnTxHash,
       });
 
       // Look up user's Stripe Customer and bank account for payout
@@ -190,7 +183,8 @@ export async function POST(
         console.log(`[PROCESS] No bank account linked, using demo payout`);
       }
 
-      // Create payout to bank account
+      // Create payout FIRST to get the payout ID for on-chain auditability
+      // This is safe because tokens are already in treasury custody
       console.log(`[PROCESS] Creating payout...`);
       const payout = await createPayout(
         stripe,
@@ -201,8 +195,18 @@ export async function POST(
       );
 
       await updateOfframpStatus(supabase, offramp.id, {
-        status: "paid_out",
+        status: "paying",
         stripe_payout_id: payout.id,
+      });
+
+      // Burn the tokens with Stripe payout ID as memo for on-chain auditability
+      // Anyone can now verify: this burn corresponds to Stripe payout po_xxx
+      console.log(`[PROCESS] Burning ${offramp.amount_usd / 100} AcmeUSD with payout reference ${payout.id}...`);
+      const burnTxHash = await burnAcmeUsd(offramp.amount_usd / 100, payout.id);
+
+      await updateOfframpStatus(supabase, offramp.id, {
+        status: "paid_out",
+        burn_tx_hash: burnTxHash,
       });
 
       console.log(`[PROCESS] Completed offramp ${offramp.id}`);

@@ -106,9 +106,11 @@ function isTimeoutError(error: unknown): boolean {
 
 // Mint AcmeUSD to a user address with timeout recovery
 // If a timeout occurs, verifies on-chain balance to determine if mint succeeded
+// Uses mintWithMemo to store payment reference on-chain for auditability
 export async function mintAcmeUsd(
   toAddress: Address,
-  amountUsd: number // Amount in dollars (e.g., 100 for $100)
+  amountUsd: number, // Amount in dollars (e.g., 100 for $100)
+  paymentReference?: string // Optional payment reference (e.g., Stripe payment_intent_id) for on-chain auditability
 ): Promise<Hash> {
   if (!config.acmeUsdAddress) {
     throw new Error("AcmeUSD address not configured");
@@ -118,8 +120,12 @@ export async function mintAcmeUsd(
   const publicClient = createTempoPublicClient();
   const amount = parseUnits(amountUsd.toString(), DECIMALS);
 
+  // Generate memo from payment reference for on-chain auditability
+  // This allows anyone to verify which payment caused which mint
+  const memo = paymentReference ? keccak256(toBytes(paymentReference)) : undefined;
+
   console.log(`[MINT] Using RPC: ${config.tempoRpcBaseUrl}, Auth: ${!!config.tempoRpcAuth}`);
-  console.log(`[MINT] Minting ${amountUsd} AcmeUSD to ${toAddress}`);
+  console.log(`[MINT] Minting ${amountUsd} AcmeUSD to ${toAddress}${memo ? ` with memo ${memo}` : ""}`);
 
   // Check balance before mint for verification
   let balanceBefore: number;
@@ -132,12 +138,20 @@ export async function mintAcmeUsd(
   }
 
   try {
-    const hash = await walletClient.writeContract({
-      address: config.acmeUsdAddress,
-      abi: TIP20_ABI,
-      functionName: "mint",
-      args: [toAddress, amount],
-    });
+    // Use mintWithMemo if we have a payment reference, otherwise use regular mint
+    const hash = memo
+      ? await walletClient.writeContract({
+          address: config.acmeUsdAddress,
+          abi: TIP20_ABI,
+          functionName: "mintWithMemo",
+          args: [toAddress, amount, memo],
+        })
+      : await walletClient.writeContract({
+          address: config.acmeUsdAddress,
+          abi: TIP20_ABI,
+          functionName: "mint",
+          args: [toAddress, amount],
+        });
 
     // Wait for transaction to be confirmed
     await publicClient.waitForTransactionReceipt({ hash });
@@ -181,8 +195,10 @@ export async function mintAcmeUsd(
 }
 
 // Burn AcmeUSD from treasury
+// Uses burnWithMemo to store offramp reference on-chain for auditability
 export async function burnAcmeUsd(
-  amountUsd: number // Amount in dollars
+  amountUsd: number, // Amount in dollars
+  offrampReference?: string // Optional offramp reference (e.g., offramp request ID) for on-chain auditability
 ): Promise<Hash> {
   if (!config.acmeUsdAddress) {
     throw new Error("AcmeUSD address not configured");
@@ -192,14 +208,25 @@ export async function burnAcmeUsd(
   const publicClient = createTempoPublicClient();
   const amount = parseUnits(amountUsd.toString(), DECIMALS);
 
-  console.log(`[BURN] Burning ${amountUsd} AcmeUSD from treasury`);
+  // Generate memo from offramp reference for on-chain auditability
+  const memo = offrampReference ? keccak256(toBytes(offrampReference)) : undefined;
 
-  const hash = await walletClient.writeContract({
-    address: config.acmeUsdAddress,
-    abi: TIP20_ABI,
-    functionName: "burn",
-    args: [amount],
-  });
+  console.log(`[BURN] Burning ${amountUsd} AcmeUSD from treasury${memo ? ` with memo ${memo}` : ""}`);
+
+  // Use burnWithMemo if we have an offramp reference, otherwise use regular burn
+  const hash = memo
+    ? await walletClient.writeContract({
+        address: config.acmeUsdAddress,
+        abi: TIP20_ABI,
+        functionName: "burnWithMemo",
+        args: [amount, memo],
+      })
+    : await walletClient.writeContract({
+        address: config.acmeUsdAddress,
+        abi: TIP20_ABI,
+        functionName: "burn",
+        args: [amount],
+      });
 
   // Wait for transaction to be confirmed
   await publicClient.waitForTransactionReceipt({ hash });

@@ -4,7 +4,7 @@ import { Providers } from "@/providers/Providers";
 import { Header } from "@/components/Header";
 
 export const metadata: Metadata = {
-  title: "AcmeUSD - Your Gateway to Digital Dollars",
+  title: "AcmeUSD Stablecoin Gateway",
   description: "Seamlessly buy and sell AcmeUSD stablecoins on the Tempo network",
 };
 
