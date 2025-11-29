@@ -15,21 +15,26 @@ A complete onramp/offramp system for AcmeUSD stablecoin on the Tempo network.
 
 ## Patches
 
-This project uses a patched version of `tempo.ts` v0.7.2 released this past thursday. See the [patches](./patches) directory for details.
+This project uses a patched version of `tempo.ts` v0.7.2. See the [patches](./patches) directory for details.
 
-### Why This Patch Is Critical
+### Why This Patch Is Necessary
 
-**The Bug**: When gas sponsorship is enabled (`feePayer: true`), tempo.ts was incorrectly including the `feeToken` field in the sender's signature domain. According to Tempo's AA Transaction Spec, when a `fee_payer_signature` is present, the sender must sign with `fee_token` set to empty (0x80), not the actual fee token address.
+**The Spec**: According to Tempo's [Native AA Transaction Spec](https://github.com/tempo-labs/native-aa-spec), under "Fee Payer Signature Details":
 
-**The Fix**: The patch modifies `serializeAA` to exclude `feeToken` from the sender's signature when `feePayer === true`. This ensures the sender signs the transaction without the fee token field, matching the protocol's expectations.
+> *Field 11 (`fee_token`) is encoded as empty string (`0x80`) **if and only if** `fee_payer_signature` is present. This allows the fee payer to specify the fee token.*
 
-**Impact on This Demo**: This patch is **essential** for the demo to function correctly. Without it, all sponsored transactions (which is every user transaction in this demo) would fail with "invalid transaction signature" errors because:
+This means when using gas sponsorship, the sender must sign with `fee_token` excluded from their signature domain.
 
-- Users sign transactions with `feePayer: true` (see `Dashboard.tsx` line 507)
-- Transactions route through `/api/sponsor` via `withFeePayer` transport (see `Providers.tsx` line 29)
-- The protocol validates that sender signatures exclude `feeToken` when fee payer signatures are present
+**The Bug**: In `tempo.ts/viem/Transaction.js`, there are two code paths for fee payer transactions:
 
-The patch ensures gas sponsorship works correctly, enabling the zero-friction UX where users don't need tokens to pay for gas.
+1. `feePayer === true` — routes to a fee payer relay (what this demo uses)
+2. `typeof feePayer === 'object'` — uses a provided fee payer signer directly
+
+tempo.ts 0.7.2 correctly excluded `feeToken` from the sender's signature in code path #2, but **forgot to do so in code path #1** (`feePayer === true`).
+
+**The Fix**: The patch adds `feeToken: undefined` to the transaction object before serialization when `feePayer === true`, ensuring the sender's signature matches the spec.
+
+**Impact**: Without this patch, all gas-sponsored transactions were failing with signature validation errors. Since every user transaction in this demo uses `feePayer: true` for zero-friction UX, this patch is essential.
 
 ## Features
 
