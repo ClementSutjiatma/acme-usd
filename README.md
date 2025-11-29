@@ -19,7 +19,7 @@ This project uses a patched version of `tempo.ts` v0.7.2. See the [patches](./pa
 
 ### Why This Patch Is Necessary
 
-**The Spec**: According to Tempo's [Native AA Transaction Spec](https://github.com/tempo-labs/native-aa-spec), under "Fee Payer Signature Details":
+**The Spec**: According to Tempo's [Native AA Transaction Spec](https://docs.tempo.xyz/documentation/protocol/transactions/spec-account-abstraction#fee-payer-signature-details), under "Fee Payer Signature Details":
 
 > *Field 11 (`fee_token`) is encoded as empty string (`0x80`) **if and only if** `fee_payer_signature` is present. This allows the fee payer to specify the fee token.*
 
