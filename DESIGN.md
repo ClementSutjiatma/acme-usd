@@ -21,20 +21,20 @@ This document outlines the design and implementation plan for building an onramp
 ---
 ## Success Criteria
 
-| Domain      | Success Criteria                                                |
-|-------------|----------------------------------------------------------------|
-| **UX**      | - Onboarding requires no prior token: users can start with $0  |
-|             | - Passkey sign-in with familiar biometrics (Face ID/Touch ID)  |
-|             | - Minimal user actions per flow (onramp: 0 txs, offramp: 1 tx) |
-|             | - Clear, real-time status for onramp/offramp requests          |
-| **Security**| - No double-minting (idempotency on payment webhooks)          |
-|             | - Only the backend ISSUER_ROLE can mint/burn AcmeUSD           |
-|             | - Private keys never exposed in code/config                    |
-|             | - Offramp payouts only after on-chain token burn confirmation  |
-| **Reliability** | - Stripe webhooks retried with idempotency, safe against replay |
-|             | - Database ensures traceability of all actions                 |
-|             | - Well-defined error/recovery handling for all failure modes   |
-|             | - Monitoring for failed/pending requests and backend wallet balances |
+| Domain      | Success Criteria                                                | Design Decision |
+|-------------|----------------------------------------------------------------|-----------------|
+| **UX**      | - Zero onboarding friction: no seed phrases, no extensions     | Tempo Passkey Wallet |
+|             | - Users start with $0 and can transact immediately             | Gas Sponsorship |
+|             | - Embedded payment with one-click for returning users          | Stripe Elements + Link |
+|             | - Minimal user actions (onramp: 0 txs, offramp: 1 tx)          | Sponsored mints, transferWithMemo |
+|             | - Users can pay fees in AcmeUSD itself                         | TIP-20 Token |
+| **Security**| - 1:1 backing: Never mint before payment confirmed                          | Strict Ordering |
+|             | - 1:1 backing: Never payout before on-chain transfer confirmed              | Strict Ordering |
+|             | - On-chain proof links every mint/burn to fiat provider IDs   | TIP-20 Memo Functions |
+|             | - Only ACME has mint/burn ACLs                       | Single Backend Wallet |
+| **Reliability** | - Idempotency against webhook retries                     | Database Unique Constraints |
+|             | - State machines track progress, enable recovery               | Explicit State Machines |
+|             | - All operations traceable via database + on-chain memos       | Event-Driven Architecture |
 
 ---
 ## UX 
