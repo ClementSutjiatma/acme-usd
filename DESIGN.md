@@ -659,12 +659,60 @@ This endpoint implements the **Fee Payer Relay** pattern from tempo.ts. The `wit
 }
 ```
 
+### Cron Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/cron/check-offramps` | GET | Poll for pending offramps and process them |
+
+This endpoint is designed to be called by Vercel Cron (or similar scheduler) to handle the asynchronous offramp flow:
+
+**GET `/api/cron/check-offramps`**
+```typescript
+// Authorization: Bearer ${CRON_SECRET}
+
+// Flow:
+// 1. Query for TransferWithMemo events to treasury
+// 2. Match memo to pending offramp requests
+// 3. For each match: burn tokens + initiate Stripe payout
+// 4. Update offramp status in database
+
+// Response
+{
+  "processed": 2,
+  "errors": []
+}
+```
+
+**Why a cron job?**
+- Users transfer tokens with memo, then the frontend calls `/api/offramp/process/:id`
+- However, if the user closes the browser or the request fails, the cron job ensures eventual processing
+- Provides reliability for the offramp flow without requiring users to stay on the page
+
 ### Utility Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/balance/:address` | GET | Get user's AcmeUSD balance |
+| `/api/transactions/:address` | GET | Get transaction history for an address |
 | `/api/health` | GET | Service health check |
+
+**GET `/api/transactions/:address`**
+```typescript
+// Response
+{
+  "transactions": [
+    {
+      "id": "uuid",
+      "type": "onramp" | "offramp",
+      "status": "completed" | "pending" | "failed",
+      "amountUsd": 100,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "txHash": "0x...",
+      "memoHash": "0x..."  // For auditability linking
+    }
+  ]
+}
+```
 
 ---
 
